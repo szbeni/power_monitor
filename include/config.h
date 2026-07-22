@@ -29,14 +29,19 @@
 #define ESS_CHANNEL 2
 #endif
 
-// Publish / print interval for the ESS consumer (ms)
+// ESS tick interval (ms): serial / UDP / optional MQTT
 #ifndef ESS_PUBLISH_INTERVAL_MS
 #define ESS_PUBLISH_INTERVAL_MS 250
 #endif
 
-// Serial status print interval (ms); 0 disables periodic serial dumps
-#ifndef SERIAL_STATUS_INTERVAL_MS
-#define SERIAL_STATUS_INTERVAL_MS 2000
+// 1 = send load2 power over UDP each ESS tick.
+#ifndef ESS_UDP_ENABLE
+#define ESS_UDP_ENABLE 0
+#endif
+
+// 1 = publish load2/power over MQTT each ESS tick.
+#ifndef ESS_MQTT_ENABLE
+#define ESS_MQTT_ENABLE 1
 #endif
 
 // HTTP server port for GET /api/power and GET /
@@ -44,14 +49,29 @@
 #define HTTP_PORT 80
 #endif
 
-// MQTT topic root. Messages:
-//   <root>/load2/power          float W  (signed active power)
-//   <root>/load2/voltage        float V
-//   <root>/load2/current        float A
-//   <root>/load2/power_factor   float
-//   <root>/load2/json           full JSON snapshot
+// MQTT:
+//   <root>/load2/power     float W @ ESS_PUBLISH_INTERVAL_MS (ESS, non-retained)
+//   <root>/tele/SENSOR     JSON snapshot @ HA_PUBLISH_INTERVAL_MS (HA)
+//   <root>/status          online/offline (availability + LWT)
 #ifndef MQTT_TOPIC_ROOT
 #define MQTT_TOPIC_ROOT "power_monitor/jsy"
+#endif
+
+// Home Assistant MQTT discovery for tele/SENSOR JSON. Set to 0 to disable.
+#ifndef HA_MQTT_DISCOVERY
+#define HA_MQTT_DISCOVERY 1
+#endif
+
+#ifndef HA_DISCOVERY_PREFIX
+#define HA_DISCOVERY_PREFIX "homeassistant"
+#endif
+
+#ifndef HA_DEVICE_NAME
+#define HA_DEVICE_NAME "JSY Load2"
+#endif
+
+#ifndef HA_PUBLISH_INTERVAL_MS
+#define HA_PUBLISH_INTERVAL_MS 10000
 #endif
 
 // After connect, bump JSY to 38400 for best ESS reactivity (~330 ms detect)
@@ -65,8 +85,9 @@
 
 // WiFi: SuperMini onboard LDO often droops during TX peaks → AUTH_EXPIRE.
 // Lower TX power cuts peak current. wifi_power_t enum value (see WiFiGeneric.h).
+// SuperMini LDO: keep TX low so MQTT at 250 ms does not brown out the radio.
 #ifndef WIFI_TX_POWER
-#define WIFI_TX_POWER WIFI_POWER_8_5dBm
+#define WIFI_TX_POWER WIFI_POWER_5dBm
 #endif
 
 #ifndef WIFI_CONNECT_TIMEOUT_MS

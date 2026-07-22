@@ -47,13 +47,22 @@ pio device monitor
 
 | Interface | Endpoint / topic | Notes |
 |-----------|------------------|--------|
-| Serial    | 115200 baud      | Load2 power every 2 s |
+| Serial    | status every 2 s | ESS tick stats |
 | HTTP      | `GET /api/power` | JSON snapshot |
-| HTTP      | `GET /`          | Simple status page |
-| MQTT      | `power_monitor/jsy/load2/power` | Active power (W), retained |
-| MQTT      | `power_monitor/jsy/load2/json`  | Full JSON |
+| MQTT ESS  | `…/load2/power` | Float W every 250 ms (non-retained) |
+| MQTT HA   | `…/tele/SENSOR` | Full JSON every 10 s + discovery |
+| MQTT      | `…/status` | `online` / `offline` (LWT) |
 
-JSON field `ess_grid_power_w` is channel-2 active power (W). Sign depends on CT orientation (typically positive = import, negative = export).
+HA auto-discovers load2 sensors from `tele/SENSOR` (`HA_MQTT_DISCOVERY`). ESS keeps the fast power topic.
+
+```bash
+./scripts/check_mqtt_interval.py --seconds 15
+./scripts/forward_ess_to_plotjuggler.py   # MQTT ESS → PlotJuggler UDP :9870
+```
+
+PlotJuggler: Streaming → UDP Server (JSON) → port **9870**, then run the forwarder.
+
+Sign of `load2/power` depends on CT orientation (typically positive = import, negative = export).
 
 ## ESS hook
 

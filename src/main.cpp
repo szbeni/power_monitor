@@ -1,13 +1,20 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <MycilaJSY.h>
-#include <PubSubClient.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <cmath>
 #include <cstring>
 
 #include "config.h"
+
+#if ESS_UDP_ENABLE
+#include <WiFiUdp.h>
+#endif
+#if ESS_MQTT_ENABLE
+#include <MQTT.h>
+#endif
 
 // ESP32-C3 has only 2 UARTs; map Serial2 helpers like Mycila examples.
 #ifndef SOC_UART_HP_NUM
@@ -23,13 +30,30 @@ static portMUX_TYPE dataMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t readCount = 0;
 static volatile uint32_t lastReadMs = 0;
 
+#if ESS_UDP_ENABLE
+static WiFiUDP udp;
+static uint32_t udpSeq = 0;
+static uint32_t udpOk = 0;
+static uint32_t udpFail = 0;
+#endif
+#if ESS_MQTT_ENABLE
 static WiFiClient wifiClient;
-static PubSubClient mqtt(wifiClient);
+static MQTTClient mqtt(1536);
+#endif
 static WebServer server(HTTP_PORT);
 
 static uint32_t lastPublishMs = 0;
-static uint32_t lastSerialMs = 0;
+static uint32_t lastEssTickMs = 0;
+#if ESS_MQTT_ENABLE
 static uint32_t lastMqttReconnectMs = 0;
+static uint32_t lastHaPublishMs = 0;
+static uint32_t mqttPublishOk = 0;
+static uint32_t mqttPublishFail = 0;
+static char mqttClientId[32] = MQTT_CLIENT_ID;
+#if HA_MQTT_DISCOVERY
+static bool haDiscoverySent = false;
+#endif
+#endif
 static bool jsyReady = false;
 
 // Set from WiFi events. AUTH_EXPIRE means the 4-way handshake failed — usually
@@ -109,64 +133,280 @@ static void onEssLoop(float powerW, const Load2Snapshot& snap) {
   // if (powerW >  50)  { /* import: discharge battery */ }
 }
 
+#if ESS_UDP_ENABLE
+static bool udpEnabled() {
+  return ESS_UDP_HOST[0] != '\0';
+}
+
+static void udpSendPower(float powerW) {
+  if (!udpEnabled() || !WiFi.isConnected() || std::isnan(powerW)) {
+    udpFail++;
+    return;
+  }
+
+  // ASCII: "<power_w> <seq> <millis>"
+  char payload[48];
+  const uint32_t seq = ++udpSeq;
+  snprintf(payload,
+           sizeof(payload),
+           "%.3f %lu %lu",
+           powerW,
+           static_cast<unsigned long>(seq),
+           static_cast<unsigned long>(millis()));
+
+  if (!udp.beginPacket(ESS_UDP_HOST, ESS_UDP_PORT)) {
+    udpFail++;
+    return;
+  }
+  udp.write(reinterpret_cast<const uint8_t*>(payload), strlen(payload));
+  if (!udp.endPacket()) {
+    udpFail++;
+    return;
+  }
+  udpOk++;
+}
+#endif // ESS_UDP_ENABLE
+
+#if ESS_MQTT_ENABLE
 static bool mqttEnabled() {
   return MQTT_HOST[0] != '\0';
 }
 
-static void mqttPublishFloat(const char* suffix, float value) {
-  if (!mqtt.connected() || std::isnan(value)) {
+static void mqttMakeClientId() {
+  // Unique ID avoids broker kicking us when an old session or second flash shares the name.
+  const uint64_t mac = ESP.getEfuseMac();
+  snprintf(mqttClientId,
+           sizeof(mqttClientId),
+           "%s-%04x",
+           MQTT_CLIENT_ID,
+           static_cast<unsigned>((mac >> 32) & 0xffff));
+}
+
+static void mqttAvailTopic(char* out, size_t outLen) {
+  snprintf(out, outLen, "%s/status", MQTT_TOPIC_ROOT);
+}
+
+static void mqttTeleTopic(char* out, size_t outLen) {
+  snprintf(out, outLen, "%s/tele/SENSOR", MQTT_TOPIC_ROOT);
+}
+
+static void mqttPublishPower(float powerW) {
+  if (!mqtt.connected() || std::isnan(powerW)) {
+    mqttPublishFail++;
     return;
   }
+
   char topic[96];
   char payload[32];
-  snprintf(topic, sizeof(topic), "%s/load2/%s", MQTT_TOPIC_ROOT, suffix);
-  dtostrf(value, 0, 3, payload);
-  mqtt.publish(topic, payload, true);
+  snprintf(topic, sizeof(topic), "%s/load2/power", MQTT_TOPIC_ROOT);
+  dtostrf(powerW, 0, 3, payload);
+
+  // qos=0, retain=false — ESS wants a live stream only.
+  if (!mqtt.publish(topic, payload, false, 0)) {
+    mqttPublishFail++;
+    return;
+  }
+  mqttPublishOk++;
+  mqtt.loop();
 }
 
-static void publishEss(const Load2Snapshot& s) {
-  onEssLoop(s.activePower, s);
+#if HA_MQTT_DISCOVERY
+struct HaTeleSensor {
+  const char* objectId;
+  const char* name;
+  const char* valueTemplate; // e.g. "{{ value_json.voltage_v }}"
+  const char* unit;          // nullptr if none
+  const char* deviceClass;   // nullptr if none
+  const char* stateClass;
+};
 
-  if (mqtt.connected() && s.connected) {
-    mqttPublishFloat("power", s.activePower);
-    mqttPublishFloat("voltage", s.voltage);
-    mqttPublishFloat("current", s.current);
-    mqttPublishFloat("power_factor", s.powerFactor);
-    mqttPublishFloat("frequency", s.frequency);
+// All HA sensors read the same Tasmota-style tele/SENSOR JSON.
+static const HaTeleSensor kHaTeleSensors[] = {
+    {"power", "Power", "{{ value_json.power_w }}", "W", "power", "measurement"},
+    {"voltage", "Voltage", "{{ value_json.voltage_v }}", "V", "voltage", "measurement"},
+    {"current", "Current", "{{ value_json.current_a }}", "A", "current", "measurement"},
+    {"power_factor", "Power Factor", "{{ value_json.power_factor }}", nullptr, "power_factor", "measurement"},
+    {"frequency", "Frequency", "{{ value_json.frequency_hz }}", "Hz", "frequency", "measurement"},
+    {"apparent_power", "Apparent Power", "{{ value_json.apparent_power_va }}", "VA", "apparent_power", "measurement"},
+    {"reactive_power", "Reactive Power", "{{ value_json.reactive_power_var }}", "var", "reactive_power", "measurement"},
+    {"energy_imported", "Energy Imported", "{{ value_json.energy_imported_wh }}", "Wh", "energy", "total_increasing"},
+    {"energy_returned", "Energy Returned", "{{ value_json.energy_returned_wh }}", "Wh", "energy", "total_increasing"},
+};
+
+static void publishHaDiscovery() {
+  if (!mqtt.connected()) {
+    return;
+  }
+
+  char availTopic[96];
+  char teleTopic[96];
+  mqttAvailTopic(availTopic, sizeof(availTopic));
+  mqttTeleTopic(teleTopic, sizeof(teleTopic));
+
+  // Remove retained discovery left by earlier builds (fixed client id, per-metric topics).
+  for (const HaTeleSensor& sensor : kHaTeleSensors) {
+    char legacyTopic[160];
+    snprintf(legacyTopic,
+             sizeof(legacyTopic),
+             "%s/sensor/%s/%s/config",
+             HA_DISCOVERY_PREFIX,
+             MQTT_CLIENT_ID,
+             sensor.objectId);
+    mqtt.publish(legacyTopic, "", true, 0);
+    mqtt.loop();
+  }
+
+  for (const HaTeleSensor& sensor : kHaTeleSensors) {
+    char configTopic[160];
+    snprintf(configTopic,
+             sizeof(configTopic),
+             "%s/sensor/%s/%s/config",
+             HA_DISCOVERY_PREFIX,
+             mqttClientId,
+             sensor.objectId);
+
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_%s", mqttClientId, sensor.objectId);
 
     JsonDocument doc;
-    toJson(s, doc);
-    char topic[96];
-    snprintf(topic, sizeof(topic), "%s/load2/json", MQTT_TOPIC_ROOT);
+    doc["name"] = sensor.name;
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = teleTopic;
+    doc["value_template"] = sensor.valueTemplate;
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    if (sensor.unit) {
+      doc["unit_of_measurement"] = sensor.unit;
+    }
+    if (sensor.deviceClass) {
+      doc["device_class"] = sensor.deviceClass;
+    }
+    doc["state_class"] = sensor.stateClass;
+
+    JsonObject device = doc["device"].to<JsonObject>();
+    device["identifiers"][0] = mqttClientId;
+    device["name"] = HA_DEVICE_NAME;
+    device["manufacturer"] = "JSY";
+    device["model"] = "JSY-MK-194G";
+    device["sw_version"] = "power_monitor";
+
     String payload;
     serializeJson(doc, payload);
-    mqtt.publish(topic, payload.c_str(), true);
+    if (!mqtt.publish(configTopic, payload.c_str(), true, 0)) {
+      Serial.printf("[ha] discovery failed: %s (len=%u)\n",
+                    sensor.objectId,
+                    static_cast<unsigned>(payload.length()));
+    }
+    mqtt.loop();
+    delay(5);
   }
+  haDiscoverySent = true;
+  Serial.println("[ha] MQTT discovery published (tele/SENSOR)");
 }
+
+static void publishHaTele(const Load2Snapshot& s) {
+  if (!mqtt.connected()) {
+    return;
+  }
+
+  JsonDocument doc;
+  toJson(s, doc);
+
+  char teleTopic[96];
+  mqttTeleTopic(teleTopic, sizeof(teleTopic));
+
+  String payload;
+  serializeJson(doc, payload);
+  if (!mqtt.publish(teleTopic, payload.c_str(), true, 0)) {
+    Serial.printf("[ha] tele publish failed (len=%u)\n", static_cast<unsigned>(payload.length()));
+  }
+  mqtt.loop();
+}
+#endif // HA_MQTT_DISCOVERY
 
 static void ensureMqtt() {
   if (!mqttEnabled() || !WiFi.isConnected() || mqtt.connected()) {
     return;
   }
-  if (millis() - lastMqttReconnectMs < 3000) {
+  if (millis() - lastMqttReconnectMs < 2000) {
     return;
   }
   lastMqttReconnectMs = millis();
 
-  Serial.printf("[mqtt] connecting to %s:%d ...\n", MQTT_HOST, MQTT_PORT);
+  char availTopic[96];
+  mqttAvailTopic(availTopic, sizeof(availTopic));
+  mqtt.setWill(availTopic, "offline", true, 0);
+
+  Serial.printf("[mqtt] connecting to %s:%d as %s ...\n", MQTT_HOST, MQTT_PORT, mqttClientId);
   bool ok;
   if (MQTT_USER[0] != '\0') {
-    ok = mqtt.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD);
+    ok = mqtt.connect(mqttClientId, MQTT_USER, MQTT_PASSWORD);
   } else {
-    ok = mqtt.connect(MQTT_CLIENT_ID);
+    ok = mqtt.connect(mqttClientId);
   }
   if (ok) {
-    Serial.println("[mqtt] connected");
-    char topic[96];
-    snprintf(topic, sizeof(topic), "%s/status", MQTT_TOPIC_ROOT);
-    mqtt.publish(topic, "online", true);
+    wifiClient.setNoDelay(true);
+    mqtt.publish(availTopic, "online", true, 0);
+    Serial.printf("[mqtt] connected (client=%s)\n", mqttClientId);
+#if HA_MQTT_DISCOVERY
+    haDiscoverySent = false;
+    publishHaDiscovery();
+    publishHaTele(captureLoad2());
+    lastHaPublishMs = millis();
+#endif
   } else {
-    Serial.printf("[mqtt] failed, rc=%d\n", mqtt.state());
+    Serial.printf("[mqtt] failed\n");
+  }
+}
+#endif // ESS_MQTT_ENABLE
+
+static void publishEss(const Load2Snapshot& s) {
+  onEssLoop(s.activePower, s);
+
+  const uint32_t now = millis();
+  const uint32_t dt = lastEssTickMs ? (now - lastEssTickMs) : 0;
+  lastEssTickMs = now;
+
+#if ESS_UDP_ENABLE
+  udpSendPower(s.activePower);
+#endif
+#if ESS_MQTT_ENABLE
+  mqttPublishPower(s.activePower);
+#endif
+
+  static uint32_t lastStatusMs = 0;
+  if (now - lastStatusMs >= 2000) {
+    lastStatusMs = now;
+#if ESS_UDP_ENABLE && ESS_MQTT_ENABLE
+    Serial.printf("[ess] P=%.3f W  dt=%lu ms  udp ok=%lu fail=%lu  mqtt=%s ok=%lu fail=%lu\n",
+                  s.activePower,
+                  static_cast<unsigned long>(dt),
+                  static_cast<unsigned long>(udpOk),
+                  static_cast<unsigned long>(udpFail),
+                  mqtt.connected() ? "up" : "down",
+                  static_cast<unsigned long>(mqttPublishOk),
+                  static_cast<unsigned long>(mqttPublishFail));
+#elif ESS_UDP_ENABLE
+    Serial.printf("[ess] P=%.3f W  dt=%lu ms  udp ok=%lu fail=%lu\n",
+                  s.activePower,
+                  static_cast<unsigned long>(dt),
+                  static_cast<unsigned long>(udpOk),
+                  static_cast<unsigned long>(udpFail));
+#elif ESS_MQTT_ENABLE
+    Serial.printf("[ess] P=%.3f W  dt=%lu ms  mqtt=%s ok=%lu fail=%lu\n",
+                  s.activePower,
+                  static_cast<unsigned long>(dt),
+                  mqtt.connected() ? "up" : "down",
+                  static_cast<unsigned long>(mqttPublishOk),
+                  static_cast<unsigned long>(mqttPublishFail));
+#else
+    Serial.printf("[ess] P=%.3f W  dt=%lu ms  age=%lu ms  reads=%lu\n",
+                  s.activePower,
+                  static_cast<unsigned long>(dt),
+                  static_cast<unsigned long>(s.ageMs),
+                  static_cast<unsigned long>(readCount));
+#endif
   }
 }
 
@@ -267,6 +507,8 @@ static bool wifiReasonIsFatal(uint8_t reason) {
 
 static void wifiApplyRadioSettings() {
   WiFi.setSleep(false);
+  // Disable modem PS — needed for a steady 250 ms MQTT stream.
+  esp_wifi_set_ps(WIFI_PS_NONE);
   // SuperMini: onboard regulator often can't sustain default TX peaks.
   if (!WiFi.setTxPower(WIFI_TX_POWER)) {
     Serial.println("[wifi] setTxPower failed");
@@ -483,16 +725,37 @@ void setup() {
   digitalWrite(STATUS_LED_PIN, LOW);
 
   Serial.begin(115200);
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  // If no serial monitor is attached, blocking USB TX stalls the ESS loop.
+  Serial.setTxTimeoutMs(0);
+#endif
   delay(800);
   Serial.println();
   Serial.println("=== power_monitor: ESP32-C3 + JSY-MK-194G load2 / ESS ===");
+  Serial.printf("[ess] tick every %d ms (udp=%s mqtt=%s)\n",
+                ESS_PUBLISH_INTERVAL_MS,
+                ESS_UDP_ENABLE ? "on" : "off",
+                ESS_MQTT_ENABLE ? "on" : "off");
 
   connectWifi();
 
-  if (mqttEnabled()) {
-    mqtt.setServer(MQTT_HOST, MQTT_PORT);
-    mqtt.setBufferSize(512);
+#if ESS_UDP_ENABLE
+  if (udpEnabled()) {
+    // Local ephemeral port; we only send.
+    udp.begin(0);
+    Serial.printf("[udp] ESS target %s:%d\n", ESS_UDP_HOST, ESS_UDP_PORT);
   }
+#endif
+
+#if ESS_MQTT_ENABLE
+  if (mqttEnabled()) {
+    mqttMakeClientId();
+    // keepalive 10s, clean session, 1s socket timeout
+    mqtt.setOptions(10, true, 1000);
+    mqtt.begin(MQTT_HOST, MQTT_PORT, wifiClient);
+    wifiClient.setNoDelay(true);
+  }
+#endif
 
   server.on("/", handleRoot);
   server.on("/api/power", handleApiPower);
@@ -502,6 +765,7 @@ void setup() {
 
   jsyReady = startJsy();
   digitalWrite(STATUS_LED_PIN, jsyReady ? HIGH : LOW);
+  lastPublishMs = millis();
 }
 
 void loop() {
@@ -516,34 +780,45 @@ void loop() {
       connectWifiOnce(WIFI_CONNECT_TIMEOUT_MS);
     }
   } else {
+#if ESS_MQTT_ENABLE
     ensureMqtt();
+#endif
+  }
+
+#if ESS_MQTT_ENABLE
+  if (mqtt.connected()) {
     mqtt.loop();
   }
+#endif
 
   server.handleClient();
 
   const uint32_t now = millis();
 
   if (now - lastPublishMs >= ESS_PUBLISH_INTERVAL_MS) {
-    lastPublishMs = now;
+    // Advance by the interval (not wall-clock) so average rate stays accurate
+    // even when a publish takes a few ms.
+    lastPublishMs += ESS_PUBLISH_INTERVAL_MS;
+    if (now - lastPublishMs >= ESS_PUBLISH_INTERVAL_MS) {
+      lastPublishMs = now; // catch up after a long stall
+    }
     const Load2Snapshot s = captureLoad2();
     publishEss(s);
+#if ESS_MQTT_ENABLE
+    if (mqtt.connected()) {
+      mqtt.loop();
+    }
+#endif
     digitalWrite(STATUS_LED_PIN, s.connected ? HIGH : LOW);
   }
 
-#if SERIAL_STATUS_INTERVAL_MS > 0
-  if (now - lastSerialMs >= SERIAL_STATUS_INTERVAL_MS) {
-    lastSerialMs = now;
-    const Load2Snapshot s = captureLoad2();
-    Serial.printf("[load2] P=%.1f W  V=%.1f V  I=%.3f A  PF=%.3f  f=%.2f Hz  age=%lums  reads=%lu  mqtt=%s\n",
-                  s.activePower,
-                  s.voltage,
-                  s.current,
-                  s.powerFactor,
-                  s.frequency,
-                  static_cast<unsigned long>(s.ageMs),
-                  static_cast<unsigned long>(readCount),
-                  mqtt.connected() ? "up" : "down");
+#if ESS_MQTT_ENABLE && HA_MQTT_DISCOVERY
+  if (mqtt.connected() && (now - lastHaPublishMs >= HA_PUBLISH_INTERVAL_MS)) {
+    lastHaPublishMs += HA_PUBLISH_INTERVAL_MS;
+    if (now - lastHaPublishMs >= HA_PUBLISH_INTERVAL_MS) {
+      lastHaPublishMs = now;
+    }
+    publishHaTele(captureLoad2());
   }
 #endif
 
