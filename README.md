@@ -75,12 +75,12 @@ Edit `onEssLoop()` in `src/main.cpp` to run local charge/discharge / divert logi
 - Model is forced to `JSY-MK-194`.
 - WiFi TX power defaults to `WIFI_POWER_8_5dBm` — SuperMini LDOs often brown out at full TX and report `AUTH_EXPIRE`.
 
-## Sofar projects (ESP8266 NodeMCU)
+## Sofar projects
 
 | Folder | What |
 |--------|------|
-| [`sofar2mqtt/`](sofar2mqtt/) | Standalone upstream Sofar2mqtt (RS485 ↔ MQTT, OLED, battery_save) |
-| [`sofar_ess/`](sofar_ess/) | Sofar + JSY-MK-194G load2 + on-device ESS active-power loop |
+| [`sofar2mqtt/`](sofar2mqtt/) | Standalone upstream Sofar2mqtt (ESP8266 NodeMCU, RS485 ↔ MQTT, OLED) |
+| [`sofar_ess/`](sofar_ess/) | ESP32-C3: Sofar RS485 + MycilaJSY load2 + on-device ESS active-power loop |
 
 ## SuperMini power tips
 

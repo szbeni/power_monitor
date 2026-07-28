@@ -6,13 +6,22 @@ cd "$ROOT"
 
 UPLOAD=0
 MONITOR=0
-UPLOAD_PORT="/dev/ttyUSB0"
+OTA=0
+UPLOAD_PORT="/dev/ttyACM0"
+OTA_IP=""
+ENV_NAME="esp32c3-supermini"
 
 usage() {
   cat <<'EOF'
-Usage: ./setup_and_build.sh [--upload [PORT]] [--monitor]
+Usage: ./setup_and_build.sh [--upload [PORT]] [--ota IP] [--monitor]
 
-Default upload port for NodeMCU is /dev/ttyUSB0.
+  --upload [PORT]   USB flash (default /dev/ttyACM0)
+  --ota IP          ArduinoOTA upload (espota) to device IP
+  --monitor         Serial monitor after upload
+
+Examples:
+  ./setup_and_build.sh --upload /dev/ttyACM0 --monitor
+  ./setup_and_build.sh --ota 192.168.1.50
 EOF
 }
 
@@ -25,9 +34,18 @@ while [[ $# -gt 0 ]]; do
         shift
       fi
       ;;
+    --ota)
+      OTA=1
+      if [[ "${2:-}" == "" || "${2:-}" == --* ]]; then
+        echo "error: --ota requires an IP address" >&2
+        exit 1
+      fi
+      OTA_IP="$2"
+      shift
+      ;;
     --monitor) MONITOR=1 ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "Unknown: $1" >&2; usage >&2; exit 1 ;;
+    *) echo "Unknown: $1" >&2; usage; exit 1 ;;
   esac
   shift
 done
@@ -49,12 +67,19 @@ if [[ ! -f include/secrets.h ]]; then
   cp include/secrets.h.example include/secrets.h
 fi
 
-echo "==> Building sofar_ess (nodemcuv2)"
-pio run
+echo "==> Building sofar_ess ($ENV_NAME)"
+pio run -e "$ENV_NAME"
 
 if [[ "$UPLOAD" -eq 1 ]]; then
-  echo "==> Uploading to $UPLOAD_PORT"
-  pio run -t upload --upload-port "$UPLOAD_PORT"
+  echo "==> Uploading (USB) to $UPLOAD_PORT"
+  pio run -e "$ENV_NAME" -t upload --upload-port "$UPLOAD_PORT"
+fi
+
+if [[ "$OTA" -eq 1 ]]; then
+  echo "==> OTA upload to $OTA_IP (env esp32c3-ota)"
+  echo "    Auth must match OTA_PASSWORD in include/secrets.h"
+  echo "    (default auth in platformio.ini: ota_change_me)"
+  pio run -e esp32c3-ota -t upload --upload-port "$OTA_IP"
 fi
 
 if [[ "$MONITOR" -eq 1 ]]; then

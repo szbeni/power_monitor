@@ -4,45 +4,50 @@
 
 // MQTT base topic (same style as Sofar2mqtt)
 #ifndef DEVICE_NAME
-#define DEVICE_NAME "SofarEss"
+#define DEVICE_NAME "sofaress"
 #endif
 
 // ---------------------------------------------------------------------------
-// Wiring — ESP8266 NodeMCU
+// Wiring — ESP32-C3 SuperMini
 //
-// Sofar RS485 (MAX485 / MAX3485) — SoftwareSerial:
-//   D5  DE/RE (HIGH=TX, LOW=RX; leave unused if module has no DE/RE)
-//   D6  RS485 RX  (ESP RX <- module RO)
-//   D7  RS485 TX  (ESP TX -> module DI)
+// SoftSerial is gone: C3 has two HW UARTs (UART0 + UART1). USB CDC is Serial.
 //
-// JSY-MK-194G TTL — SoftwareSerial @ 9600:
-//   D1  JSY RX  (ESP RX <- JSY TX)
-//   D2  JSY TX  (ESP TX -> JSY RX)
-//   3V3 JSY VCC (3.3 V is fine)
-//   GND shared
+// JSY-MK-194G TTL — HardwareSerial Serial1 (MycilaJSY):
+//   GPIO20  ESP RX <- JSY TX
+//   GPIO21  ESP TX -> JSY RX
+//   3V3     JSY VCC (3.3 V is fine)
+//   GND     shared
 //
-// Debug — hardware UART0 (USB):
-//   RX/TX  Serial @ 115200
+// Sofar RS485 (MAX485 / MAX3485) — HardwareSerial Serial0:
+//   GPIO4   DE/RE (HIGH=TX, LOW=RX; leave unused if module has no DE/RE)
+//   GPIO5   RS485 RX  (ESP RX <- module RO)
+//   GPIO6   RS485 TX  (ESP TX -> module DI)
+//
+// Debug — USB CDC Serial @ 115200
 //
 // Put the grid / ESS CT through JSY channel 2 (load2 / CT2).
-// Only one SoftSerial listens at a time; firmware alternates.
 // ---------------------------------------------------------------------------
 
 #ifndef SOFAR_DE_PIN
-#define SOFAR_DE_PIN D5
+#define SOFAR_DE_PIN 4
 #endif
 #ifndef SOFAR_RX_PIN
-#define SOFAR_RX_PIN D6
+#define SOFAR_RX_PIN 5
 #endif
 #ifndef SOFAR_TX_PIN
-#define SOFAR_TX_PIN D7
+#define SOFAR_TX_PIN 6
 #endif
 
 #ifndef JSY_RX_PIN
-#define JSY_RX_PIN D1
+#define JSY_RX_PIN 20 // ESP RX <- JSY TX
 #endif
 #ifndef JSY_TX_PIN
-#define JSY_TX_PIN D2
+#define JSY_TX_PIN 21 // ESP TX -> JSY RX
+#endif
+
+// After connect, bump JSY to 38400 for best ESS reactivity (~330 ms detect)
+#ifndef JSY_TARGET_BAUD
+#define JSY_TARGET_BAUD 38400
 #endif
 
 #ifndef LOG_BAUD
@@ -52,14 +57,6 @@
 
 #ifndef SOFAR_SLAVE_ID
 #define SOFAR_SLAVE_ID 0x01
-#endif
-
-#ifndef JSY_SLAVE_ID
-#define JSY_SLAVE_ID 0x01
-#endif
-
-#ifndef JSY_BAUD
-#define JSY_BAUD 9600
 #endif
 
 #ifdef INVERTER_ME3000
@@ -77,24 +74,34 @@
 #define ESS_ENABLE 1
 #endif
 
-// How often to read JSY and update Sofar (ms)
+// How often to sample JSY snapshot and update Sofar (ms).
+// ~500 ms tracks MycilaJSY @ 38400 (~330 ms change detect) without flooding RS485.
 #ifndef ESS_LOOP_INTERVAL_MS
-#define ESS_LOOP_INTERVAL_MS 2000
+#define ESS_LOOP_INTERVAL_MS 500
 #endif
 
-// Deadband around 0 W — avoid chatter
+// Deadband around 0 W — freeze integrator / avoid chatter
 #ifndef ESS_DEADBAND_W
-#define ESS_DEADBAND_W 80
+#define ESS_DEADBAND_W 20
 #endif
 
 // Minimum command change before re-sending to inverter (W)
 #ifndef ESS_MIN_DELTA_W
-#define ESS_MIN_DELTA_W 50
+#define ESS_MIN_DELTA_W 10
 #endif
 
 // Re-send same setpoint at least this often (ms) so inverter stays in mode
 #ifndef ESS_REFRESH_MS
-#define ESS_REFRESH_MS 15000
+#define ESS_REFRESH_MS 60000
+#endif
+
+// PI gains for zero-export (Ts = ESS_LOOP_INTERVAL_MS). Tunable via MQTT set/kp|ki.
+// u = Kp*e + Ki*∫e  with e = grid_power_w (+import → +discharge).
+#ifndef ESS_KP
+#define ESS_KP 0.4f
+#endif
+#ifndef ESS_KI
+#define ESS_KI 0.3f
 #endif
 
 #ifndef HEARTBEAT_INTERVAL_MS
@@ -102,5 +109,40 @@
 #endif
 
 #ifndef MQTT_STATE_INTERVAL_MS
-#define MQTT_STATE_INTERVAL_MS 10000
+#define MQTT_STATE_INTERVAL_MS 5000
+#endif
+
+// Home Assistant MQTT discovery (entities under homeassistant/*/sofaress/*/config)
+#ifndef HA_MQTT_DISCOVERY
+#define HA_MQTT_DISCOVERY 1
+#endif
+
+#ifndef HA_DISCOVERY_PREFIX
+#define HA_DISCOVERY_PREFIX "homeassistant"
+#endif
+
+#ifndef HA_DEVICE_NAME
+#define HA_DEVICE_NAME "Sofar ESS"
+#endif
+
+#ifndef STATUS_LED_PIN
+#define STATUS_LED_PIN 8 // onboard blue LED on most C3 SuperMini boards
+#endif
+
+// WiFi: SuperMini onboard LDO often droops during TX peaks → AUTH_EXPIRE.
+#ifndef WIFI_TX_POWER
+#define WIFI_TX_POWER WIFI_POWER_5dBm
+#endif
+
+#ifndef WIFI_CONNECT_TIMEOUT_MS
+#define WIFI_CONNECT_TIMEOUT_MS 10000
+#endif
+
+#ifndef WIFI_RETRY_INTERVAL_MS
+#define WIFI_RETRY_INTERVAL_MS 15000
+#endif
+
+// 1 = enable ArduinoOTA (LAN upload via espota)
+#ifndef OTA_ENABLE
+#define OTA_ENABLE 1
 #endif
