@@ -17,6 +17,8 @@ static PubSubClient mqtt(wifi);
 
 static bool essEnabled = ESS_ENABLE;
 static float lastGridPowerW = NAN;
+static float lastEnergyImportWh = NAN;
+static float lastEnergyExportWh = NAN;
 static uint32_t lastEssMs = 0;
 static uint32_t lastHeartbeatMs = 0;
 static uint32_t lastMqttStateMs = 0;
@@ -189,6 +191,10 @@ static void publishState() {
   json += essEnabled ? "true" : "false";
   json += ",\"grid_power_w\":";
   json += isnan(lastGridPowerW) ? "null" : String(lastGridPowerW, 1);
+  json += ",\"energy_import_wh\":";
+  json += isnan(lastEnergyImportWh) ? "null" : String(lastEnergyImportWh, 1);
+  json += ",\"energy_export_wh\":";
+  json += isnan(lastEnergyExportWh) ? "null" : String(lastEnergyExportWh, 1);
   json += ",\"ess_command_w\":";
   json += String(lastCmdW);
   json += ",\"sofar_mode\":\"";
@@ -251,16 +257,19 @@ void loop() {
     lastEssMs = now;
     JsyLoad2 jsy;
     if (jsyReadLoad2(jsyBus, jsy)) {
-      Log.printf("[jsy] load2 P=%.1fW V=%.1f I=%.3f f=%.2f\n",
+      lastGridPowerW = jsy.activePower;
+      lastEnergyImportWh = jsy.energyImportWh;
+      lastEnergyExportWh = jsy.energyExportWh;
+      Log.printf("[jsy] load2 P=%.1fW V=%.1f E+=%.1fWh E-=%.1fWh\n",
                  jsy.activePower,
                  jsy.voltage,
-                 jsy.current,
-                 jsy.frequency);
+                 jsy.energyImportWh,
+                 jsy.energyExportWh);
+      mqttPublish("ess/grid_power", String(jsy.activePower, 1));
+      mqttPublish("ess/energy_import_wh", String(jsy.energyImportWh, 1));
+      mqttPublish("ess/energy_export_wh", String(jsy.energyExportWh, 1));
       if (essEnabled) {
         applyEss(jsy.activePower);
-      } else {
-        lastGridPowerW = jsy.activePower;
-        mqttPublish("ess/grid_power", String(jsy.activePower, 1));
       }
     } else {
       Log.println("[jsy] read failed");

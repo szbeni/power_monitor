@@ -90,7 +90,10 @@ bool jsyReadLoad2(SoftwareSerial& bus, JsyLoad2& out) {
   out.voltage = beU32(data + off(0x0050)) * 0.0001f;
   out.current = beU32(data + off(0x0051)) * 0.0001f;
   out.activePower = beU32(data + off(0x0052)) * 0.0001f * sign;
+  // 0x0053 / 0x0055: Wh with scale 0.1 (same as MycilaJSY)
+  out.energyImportWh = beU32(data + off(0x0053)) * 0.1f;
   out.powerFactor = beU32(data + off(0x0054)) * 0.001f;
+  out.energyExportWh = beU32(data + off(0x0055)) * 0.1f;
   out.ok = out.frequency > 0 && !isnan(out.activePower);
   return out.ok;
 }
