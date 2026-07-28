@@ -5,4 +5,5 @@
 .vscode/ipch
 include/secrets.h
 sofar_ess/include/secrets.h
+sofar2mqtt/include/secrets.h
 *.log
