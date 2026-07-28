@@ -10,10 +10,9 @@
 //   GPIO20 (RX)  <--  TX
 //   GPIO21 (TX)  -->  RX
 //   GND          ---  GND
-//   5V           ---  VCC   (JSY usually wants 5V supply)
+//   3V3          ---  VCC   (3.3 V is fine)
 //
-// Cross TX/RX. Share GND. If the JSY UART TX is 5V logic, use a level
-// shifter (or divider) into GPIO20 — the C3 is NOT 5V tolerant.
+// Cross TX/RX. Share GND. With 3.3 V supply, UART is 3.3 V-safe for the C3.
 // ---------------------------------------------------------------------------
 
 #ifndef JSY_RX_PIN

@@ -28,7 +28,7 @@ Inverter must be in **Passive Mode** (same requirement as Sofar2mqtt).
 | JSY TX | D2 | JSY RX |
 | Debug (USB UART0) | RX/TX | serial monitor @ 115200 |
 | | GND | shared GND |
-| | 5V | JSY VCC (+ RS485 module as needed) |
+| | 3V3 | JSY VCC (3.3 V OK; RS485 module as required) |
 
 Grid / ESS CT → **JSY CT2 (channel 2)**.
 

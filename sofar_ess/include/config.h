@@ -18,7 +18,7 @@
 // JSY-MK-194G TTL — SoftwareSerial @ 9600:
 //   D1  JSY RX  (ESP RX <- JSY TX)
 //   D2  JSY TX  (ESP TX -> JSY RX)
-//   5V  JSY VCC
+//   3V3 JSY VCC (3.3 V is fine)
 //   GND shared
 //
 // Debug — hardware UART0 (USB):

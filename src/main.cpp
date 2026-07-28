@@ -647,7 +647,7 @@ static void connectWifi() {
   Serial.println("[wifi] still down. On SuperMini, AUTH_EXPIRE is often power:");
   Serial.println("  - use a solid USB data port / short cable (not a weak hub)");
   Serial.println("  - add ~100uF on 3V3 near the board");
-  Serial.println("  - don't feed JSY + ESP from a marginal 5V supply");
+  Serial.println("  - don't starve the ESP 3V3 rail (JSY + WiFi peak current)");
   Serial.println("  - also verify password / 2.4GHz / WPA2");
 }
 
@@ -677,7 +677,7 @@ static bool startJsy() {
   delay(500);
 
   if (!jsy.isEnabled()) {
-    Serial.println("[jsy] failed to start — check wiring / 5V / TX-RX swap");
+    Serial.println("[jsy] failed to start — check wiring / 3V3 / TX-RX swap");
     return false;
   }
 

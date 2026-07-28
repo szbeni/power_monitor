@@ -9,11 +9,11 @@ Firmware that reads **channel 2 (load2)** from a [JSY-MK-194G](https://www.jsypo
 | GPIO20 (RX)        | TX          |
 | GPIO21 (TX)        | RX          |
 | GND                | GND         |
-| 5V                 | VCC         |
+| 3V3                | VCC         |
 
 - Cross TX/RX and share GND.
 - Put the grid / ESS-relevant conductor through **CT2 (channel 2)**.
-- The C3 is **3.3 V logic only**. If the JSY UART TX is 5 V, use a level shifter into GPIO20.
+- Power JSY from **3V3** (works fine; keeps UART at 3.3 V for the C3).
 
 Pins are set in `include/config.h` (`JSY_RX_PIN` / `JSY_TX_PIN`).
 
@@ -88,5 +88,5 @@ If you see `AUTH_EXPIRE` even with a correct password:
 
 - Use a solid USB port / short cable (avoid weak hubs)
 - Add ~100 µF on **3V3** near the board
-- Don't starve the ESP by powering the JSY from a marginal shared 5 V rail
+- Don't starve the ESP 3V3 rail (JSY + WiFi peak current)
 - Keep `WIFI_TX_POWER` low in `include/config.h` if the AP is nearby
