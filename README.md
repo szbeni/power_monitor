@@ -75,6 +75,10 @@ Edit `onEssLoop()` in `src/main.cpp` to run local charge/discharge / divert logi
 - Model is forced to `JSY-MK-194`.
 - WiFi TX power defaults to `WIFI_POWER_8_5dBm` — SuperMini LDOs often brown out at full TX and report `AUTH_EXPIRE`.
 
+## Sofar + JSY ESS (ESP8266 NodeMCU)
+
+See [`sofar_ess/`](sofar_ess/) — NodeMCU firmware that talks to the Sofar inverter over RS485 and the JSY-MK-194G over TTL, and runs the active-power ESS loop on-device.
+
 ## SuperMini power tips
 
 If you see `AUTH_EXPIRE` even with a correct password:
