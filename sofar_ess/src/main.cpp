@@ -625,7 +625,7 @@ static void publishState() {
     json += ",\"run_state\":";
     json += String(lastSofar.runState);
     json += ",\"battery_soc\":";
-    json += String(lastSofar.batterySoc);
+    json += lastSofar.socValid ? String(lastSofar.batterySoc) : String("null");
     json += ",\"battery_power_w\":";
     json += String(lastSofar.batteryPowerW);
     json += ",\"sofar_grid_raw\":";

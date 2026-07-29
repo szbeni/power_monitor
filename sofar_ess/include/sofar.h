@@ -20,6 +20,7 @@ struct SofarStatus {
   // Signed battery power (W): +discharge, −charge. 0 if idle / unknown.
   int16_t batteryPowerW = 0;
   uint16_t batterySoc = 0;
+  bool socValid = false;
   bool ok = false;
 };
 

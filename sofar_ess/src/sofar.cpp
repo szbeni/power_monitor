@@ -10,6 +10,7 @@ uint16_t lastSetpointW_ = 0;
 
 constexpr uint8_t FN_READ = 0x03;
 constexpr uint8_t FN_PASSIVE = 0x42;
+constexpr uint8_t FN_HEARTBEAT = 0x49;
 constexpr uint16_t CMD_STANDBY = 0x0100;
 constexpr uint16_t CMD_DISCHARGE = 0x0101;
 constexpr uint16_t CMD_CHARGE = 0x0102;
@@ -21,6 +22,12 @@ constexpr uint16_t REG_BATTSOC = 0x0210;
 constexpr uint16_t REG_GRIDW = 0x0212;
 
 constexpr uint32_t kListenTimeoutMs = 400;
+// A reply that is still in flight when we transmit would be read as the answer
+// to the *next* request (FN 0x03 replies carry no register address, so nothing
+// else catches it). Drain until the bus has been idle for one Modbus t3.5 gap
+// (~4 ms @ 9600 8N1) instead of a fixed delay.
+constexpr uint32_t kBusQuietMs = 6;
+constexpr uint32_t kBusDrainMaxMs = 250;
 
 // 0x020d as signed int16 ×10 → W.
 // Sofar: charge +, discharge −. Our ESS convention: +discharge / −charge.
@@ -43,21 +50,37 @@ struct Resp {
 
 void flushBus() {
   bus_->flush();
-  delay(5);
-  while (bus_->available()) {
-    bus_->read();
+  const uint32_t start = millis();
+  uint32_t lastByte = start;
+  uint16_t dropped = 0;
+  while (millis() - lastByte < kBusQuietMs) {
+    if (bus_->available()) {
+      bus_->read();
+      dropped++;
+      lastByte = millis();
+    } else {
+      delay(1);
+    }
+    if (millis() - start > kBusDrainMaxMs) {
+      break;
+    }
+  }
+  if (dropped) {
+    Log.printf("[sofar] drained %u stale byte(s)\n", dropped);
   }
 }
 
 // Returns false and sets why on failure (static buffer, overwritten each call).
 const char* listenFailWhy_ = "";
 
-bool listen(Resp& resp, uint8_t expectId) {
+bool listen(Resp& resp, uint8_t expectId, uint8_t expectFn, bool verbose = true) {
   uint8_t frame[64];
   uint8_t n = 0;
   uint8_t fn = 0;
   uint8_t dataBytes = 0;
+  uint8_t expectLen = 0; // total frame length once known, 0 = still unknown
   bool done = false;
+  bool exception = false;
   uint16_t junk = 0;
   resp = {};
   listenFailWhy_ = "timeout";
@@ -71,35 +94,41 @@ bool listen(Resp& resp, uint8_t expectId) {
     }
 
     frame[n] = bus_->read();
-    switch (n) {
-      case 0:
-        if (frame[0] != expectId) {
-          junk++;
-          n = 0;
-          continue;
+
+    if (n == 0) {
+      if (frame[0] != expectId) {
+        junk++;
+        continue;
+      }
+    } else if (n == 1) {
+      fn = frame[1];
+      if (fn == uint8_t(expectFn | 0x80)) {
+        // Modbus exception: [id][fn|0x80][code][crc][crc] — byte 2 is the
+        // exception code, not a byte count.
+        exception = true;
+        expectLen = 5;
+      } else if (fn != expectFn) {
+        listenFailWhy_ = "fn";
+        if (verbose) {
+          Log.printf("[sofar] unexpected fn 0x%02X (want 0x%02X)\n", fn, expectFn);
         }
-        break;
-      case 1:
-        fn = frame[1];
-        (void)fn;
-        break;
-      case 2:
-        // Byte 2 is data-byte count for normal replies (same as Sofar2mqtt).
-        dataBytes = frame[2];
-        if (dataBytes + 5 > sizeof(frame)) {
-          listenFailWhy_ = "len";
-          return false;
+        return false;
+      }
+    } else if (n == 2 && !exception) {
+      // Byte 2 is data-byte count for normal replies (same as Sofar2mqtt).
+      dataBytes = frame[2];
+      if (dataBytes < 2 || dataBytes > sizeof(resp.data)) {
+        listenFailWhy_ = "len";
+        if (verbose) {
+          Log.printf("[sofar] bad byte count %u\n", dataBytes);
         }
-        break;
-      default:
-        // Need indices [0 .. dataBytes+4] inclusive = dataBytes+5 bytes total
-        // (3 header + data + 2 CRC). Sofar2mqtt sets done when inByteNum > dataBytes+3.
-        if (n > dataBytes + 3) {
-          done = true;
-        }
-        break;
+        return false;
+      }
+      expectLen = dataBytes + 5; // 3 header + data + 2 CRC
     }
+
     n++;
+    done = (expectLen != 0) && (n >= expectLen);
   }
 
   if (!done || n < 5) {
@@ -114,11 +143,20 @@ bool listen(Resp& resp, uint8_t expectId) {
   }
   if (!modbusCheckCrc(frame, n)) {
     listenFailWhy_ = "crc";
-    Log.printf("[sofar] CRC fail n=%u:", n);
-    for (uint8_t i = 0; i < n && i < 16; i++) {
-      Log.printf(" %02X", frame[i]);
+    if (verbose) {
+      Log.printf("[sofar] CRC fail n=%u:", n);
+      for (uint8_t i = 0; i < n && i < 16; i++) {
+        Log.printf(" %02X", frame[i]);
+      }
+      Log.println();
     }
-    Log.println();
+    return false;
+  }
+  if (exception) {
+    listenFailWhy_ = "exception";
+    if (verbose) {
+      Log.printf("[sofar] exception fn=0x%02X code=0x%02X\n", fn, frame[2]);
+    }
     return false;
   }
 
@@ -129,7 +167,7 @@ bool listen(Resp& resp, uint8_t expectId) {
   return true;
 }
 
-bool sendRaw(uint8_t* frame, size_t size, Resp* resp) {
+bool sendRaw(uint8_t* frame, size_t size, Resp* resp, uint8_t expectFn) {
   modbusCalcCrc(frame, size);
   flushBus();
   digitalWrite(SOFAR_DE_PIN, HIGH);
@@ -139,11 +177,13 @@ bool sendRaw(uint8_t* frame, size_t size, Resp* resp) {
   digitalWrite(SOFAR_DE_PIN, LOW);
 
   if (!resp) {
+    // Fire-and-forget (heartbeat): consume the reply so it can't be mistaken
+    // for the next read's answer, but its framing is undocumented — don't log.
     Resp dummy;
-    listen(dummy, SOFAR_SLAVE_ID);
+    listen(dummy, SOFAR_SLAVE_ID, expectFn, false);
     return true;
   }
-  return listen(*resp, SOFAR_SLAVE_ID);
+  return listen(*resp, SOFAR_SLAVE_ID, expectFn);
 }
 
 bool sendPassive(uint16_t cmd, uint16_t param) {
@@ -157,7 +197,7 @@ bool sendPassive(uint16_t cmd, uint16_t param) {
       0,
       0};
   Resp rs;
-  if (!sendRaw(frame, sizeof(frame), &rs) || rs.dataSize < 2) {
+  if (!sendRaw(frame, sizeof(frame), &rs, FN_PASSIVE) || rs.dataSize != 2) {
     Log.printf("[sofar] passive 0x%04X FAIL (%s)\n", cmd, listenFailWhy_);
     return false;
   }
@@ -170,7 +210,7 @@ bool readReg(uint16_t reg, uint16_t& value) {
   uint8_t frame[] = {
       SOFAR_SLAVE_ID, FN_READ, uint8_t(reg >> 8), uint8_t(reg & 0xff), 0x00, 0x01, 0, 0};
   Resp rs;
-  if (!sendRaw(frame, sizeof(frame), &rs) || rs.dataSize < 2) {
+  if (!sendRaw(frame, sizeof(frame), &rs, FN_READ) || rs.dataSize != 2) {
     Log.printf("[sofar] read 0x%04X FAIL (%s)\n", reg, listenFailWhy_);
     return false;
   }
@@ -197,8 +237,8 @@ void sofarHeartbeat() {
   if (!bus_) {
     return;
   }
-  uint8_t frame[] = {SOFAR_SLAVE_ID, 0x49, 0x22, 0x01, 0x22, 0x02, 0x00, 0x00};
-  sendRaw(frame, sizeof(frame), nullptr);
+  uint8_t frame[] = {SOFAR_SLAVE_ID, FN_HEARTBEAT, 0x22, 0x01, 0x22, 0x02, 0x00, 0x00};
+  sendRaw(frame, sizeof(frame), nullptr, FN_HEARTBEAT);
 }
 
 bool sofarStandby() {
@@ -243,9 +283,37 @@ bool sofarDischarge(uint16_t watts) {
   return ok;
 }
 
+// SoC must be 0..100. A large step is more likely a mis-paired reply than a
+// real jump, so make it prove itself on the next poll before we believe it.
+static bool acceptSoc(SofarStatus& cache, uint16_t v) {
+  static uint16_t pending = 0;
+  static bool havePending = false;
+
+  if (v > 100) {
+    Log.printf("[sofar] SoC %u out of range — ignored\n", v);
+    havePending = false;
+    return false;
+  }
+
+  const int delta = int(v) - int(cache.batterySoc);
+  const bool jump = cache.socValid && (delta > 20 || delta < -20);
+  if (jump && !(havePending && pending == v)) {
+    Log.printf("[sofar] SoC jump %u -> %u — waiting for confirmation\n", cache.batterySoc, v);
+    pending = v;
+    havePending = true;
+    return false;
+  }
+
+  havePending = false;
+  cache.batterySoc = v;
+  cache.socValid = true;
+  return true;
+}
+
 bool sofarPollStatusField(SofarStatus& cache) {
   // One register per call so ESS timing stays predictable (~one Modbus txn).
   static uint8_t phase = 0;
+  static uint8_t failStreak = 0;
   uint16_t v = 0;
   bool ok = false;
 
@@ -273,14 +341,22 @@ bool sofarPollStatusField(SofarStatus& cache) {
     default:
       ok = readReg(REG_BATTSOC, v);
       if (ok) {
-        cache.batterySoc = v;
+        ok = acceptSoc(cache, v);
       }
       break;
   }
-  phase++;
 
+  // Advancing unconditionally means one dropped reply offsets the round robin
+  // forever, and FN 0x03 replies carry no register address to catch it with.
+  // Retry the same register, but give up after a few tries so an unsupported
+  // one can't stall the rotation.
   if (ok) {
+    failStreak = 0;
+    phase++;
     cache.ok = true;
+  } else if (++failStreak >= 3) {
+    failStreak = 0;
+    phase++;
   }
   return ok;
 }
