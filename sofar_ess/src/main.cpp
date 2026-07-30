@@ -31,6 +31,7 @@ static WiFiClient wifi;
 static PubSubClient mqtt(wifi);
 
 static bool essEnabled = ESS_ENABLE;
+static bool essChargeOnly = ESS_CHARGE_ONLY;
 static float essKp = ESS_KP;
 static float essKi = ESS_KI;
 static float essDeadbandW = float(ESS_DEADBAND_W);
@@ -116,6 +117,7 @@ static void publishEssParams() {
   mqttPublish("ess/ki", String(essKi, 3), true);
   mqttPublish("ess/deadband", String(essDeadbandW, 1), true);
   mqttPublish("ess/min_delta", String(essMinDeltaW, 1), true);
+  mqttPublish("ess/charge_only", essChargeOnly ? "true" : "false", true);
 }
 
 #if HA_MQTT_DISCOVERY
@@ -170,6 +172,7 @@ static void publishHaDiscovery() {
   const String stateTopic = String(DEVICE_NAME) + "/state";
   const String availTopic = String(DEVICE_NAME) + "/status";
   const String setEssTopic = String(DEVICE_NAME) + "/set/ess";
+  const String setChargeOnlyTopic = String(DEVICE_NAME) + "/set/charge_only";
   const String setStandbyTopic = String(DEVICE_NAME) + "/set/standby";
   const String setAutoTopic = String(DEVICE_NAME) + "/set/auto";
 
@@ -219,6 +222,27 @@ static void publishHaDiscovery() {
     String payload;
     serializeJson(doc, payload);
     haPublishConfig("switch", "ess_enabled", payload);
+  }
+
+  // Charge-only: soak export, never discharge
+  {
+    JsonDocument doc;
+    doc["name"] = "ESS Charge Only";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_ess_charge_only", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = String(DEVICE_NAME) + "/ess/charge_only";
+    doc["command_topic"] = setChargeOnlyTopic;
+    doc["payload_on"] = "true";
+    doc["payload_off"] = "false";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("switch", "ess_charge_only", payload);
   }
 
   // PI gain numbers (MQTT set/kp|ki)
@@ -318,26 +342,30 @@ static void applyEss(float gridPowerW) {
 
   const float e = gridPowerW;
   const float maxW = float(MAX_POWER_W);
+  // Charge-only: allow charge (−) and standby (0), never discharge (+).
+  const float uMax = essChargeOnly ? 0.0f : maxW;
+  const float uMin = -maxW;
 
   float uProbe = essKp * e + essKi * essIntegral;
-  const bool saturated = (uProbe > maxW) || (uProbe < -maxW);
+  const bool saturated = (uProbe > uMax) || (uProbe < uMin);
 
   // Integrate only outside deadband and when not pushing further into saturation.
   if (fabsf(e) >= essDeadbandW && !saturated) {
     essIntegral += e * Ts;
     const float iLim = (essKi > 1e-6f) ? (maxW / essKi) : maxW;
-    if (essIntegral > iLim) {
-      essIntegral = iLim;
+    const float iMax = essChargeOnly ? 0.0f : iLim;
+    if (essIntegral > iMax) {
+      essIntegral = iMax;
     } else if (essIntegral < -iLim) {
       essIntegral = -iLim;
     }
   }
 
   float u = essKp * e + essKi * essIntegral;
-  if (u > maxW) {
-    u = maxW;
-  } else if (u < -maxW) {
-    u = -maxW;
+  if (u > uMax) {
+    u = uMax;
+  } else if (u < uMin) {
+    u = uMin;
   }
 
   int16_t targetW = 0;
@@ -354,6 +382,11 @@ static void applyEss(float gridPowerW) {
     }
   } else {
     // e still large but u in deadband — hold off commanding tiny watts
+    targetW = 0;
+  }
+
+  // Hard clamp: charge-only never issues a discharge command.
+  if (essChargeOnly && targetW > 0) {
     targetW = 0;
   }
 
@@ -378,7 +411,7 @@ static void applyEss(float gridPowerW) {
     lastCmdMs = now;
   }
 
-  Log.printf("[ess] grid=%.1fW u=%.1f I=%.1f dt=%.2f kp=%.2f ki=%.2f cmd=%d (%s) ok=%d\n",
+  Log.printf("[ess] grid=%.1fW u=%.1f I=%.1f dt=%.2f kp=%.2f ki=%.2f cmd=%d (%s%s) ok=%d\n",
              gridPowerW,
              u,
              essIntegral,
@@ -387,6 +420,7 @@ static void applyEss(float gridPowerW) {
              essKi,
              int(targetW),
              modeName(sofarLastMode()),
+             essChargeOnly ? " charge_only" : "",
              int(ok));
   mqttPublish("ess/grid_power", String(gridPowerW, 1));
   mqttPublish("ess/command_w", String(targetW));
@@ -406,11 +440,37 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Log.printf("[mqtt] %s = %s\n", topic, msg.c_str());
 
   if (cmd == "ess") {
-    essEnabled = (msg != "false" && msg != "0" && msg != "off");
-    if (!essEnabled) {
+    // true / on / 1 → enable ESS (leave charge_only as-is)
+    // charge_only / excess / battery_save → enable + charge-only
+    // full / bidirectional → enable + allow discharge
+    // false / 0 / off → disable
+    if (msg == "false" || msg == "0" || msg == "off") {
+      essEnabled = false;
       resetEssIntegral();
+    } else if (msg == "charge_only" || msg == "excess" || msg == "battery_save") {
+      essEnabled = true;
+      essChargeOnly = true;
+      if (essIntegral > 0.0f) {
+        essIntegral = 0.0f;
+      }
+    } else if (msg == "full" || msg == "bidirectional") {
+      essEnabled = true;
+      essChargeOnly = false;
+    } else {
+      essEnabled = true;
     }
     mqttPublish("ess/enabled", essEnabled ? "true" : "false", true);
+    mqttPublish("ess/charge_only", essChargeOnly ? "true" : "false", true);
+    return;
+  }
+
+  if (cmd == "charge_only") {
+    essChargeOnly = (msg != "false" && msg != "0" && msg != "off");
+    if (essChargeOnly && essIntegral > 0.0f) {
+      essIntegral = 0.0f;
+    }
+    Log.printf("[ess] charge_only=%d\n", int(essChargeOnly));
+    mqttPublish("ess/charge_only", essChargeOnly ? "true" : "false", true);
     return;
   }
 
@@ -600,6 +660,8 @@ static void publishState() {
   String json = "{";
   json += "\"ess_enabled\":";
   json += essEnabled ? "true" : "false";
+  json += ",\"ess_charge_only\":";
+  json += essChargeOnly ? "true" : "false";
   json += ",\"grid_power_w\":";
   json += isnan(lastGridPowerW) ? "null" : String(lastGridPowerW, 1);
   json += ",\"energy_import_wh\":";

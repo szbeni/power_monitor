@@ -65,13 +65,18 @@
 #endif
 #else
 #ifndef MAX_POWER_W
-#define MAX_POWER_W 3600
+#define MAX_POWER_W 2500
 #endif
 #endif
 
 // ESS closed-loop control (JSY load2 → Sofar passive charge/discharge)
 #ifndef ESS_ENABLE
 #define ESS_ENABLE 1
+#endif
+
+// 1 = charge from excess export only (command ≤ 0); never discharge
+#ifndef ESS_CHARGE_ONLY
+#define ESS_CHARGE_ONLY 0
 #endif
 
 // How often to sample JSY snapshot and update Sofar (ms).

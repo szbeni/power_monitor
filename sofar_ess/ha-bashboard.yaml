@@ -1,0 +1,171 @@
+# Sofar ESS — Energy dashboard view
+# Paste as a Lovelace view (raw config), or merge into an existing dashboard.
+# Requires: MQTT-discovered Sofar ESS entities + packages/smart_energy.yaml
+# (see ha-smart-energy-package.yaml).
+
+- theme: Backend-selected
+  title: Energy
+  path: energy
+  icon: mdi:flash
+  badges: []
+  cards:
+    # ── Live overview ──────────────────────────────────────────────
+    - type: grid
+      columns: 4
+      square: false
+      cards:
+        - type: entity
+          entity: sensor.sofar_ess_grid_power
+          name: Grid
+        - type: entity
+          entity: sensor.opendtu_60d84c_ac_power
+          name: Solar
+        - type: entity
+          entity: sensor.load_power
+          name: Load
+        - type: entity
+          entity: sensor.sofar_ess_battery_power
+          name: Battery
+        - type: entity
+          entity: sensor.sofar_ess_battery_soc
+          name: SOC
+        - type: entity
+          entity: sensor.sofar_ess_ess_command
+          name: Command
+        - type: entity
+          entity: sensor.sofar_ess_sofar_mode
+          name: Mode
+        - type: entity
+          entity: sensor.smart_charge_status
+          name: Smart charge
+
+    - type: history-graph
+      title: Power (1 h)
+      hours_to_show: 1
+      entities:
+        - entity: sensor.opendtu_60d84c_ac_power
+          name: Solar
+        - entity: sensor.sofar_ess_grid_power
+          name: Grid
+        - entity: sensor.load_power
+          name: Load
+        - entity: sensor.sofar_ess_battery_power
+          name: Battery
+
+    - type: sensor
+      entity: sensor.sofar_ess_battery_soc
+      graph: line
+      detail: 1
+      hours_to_show: 24
+      name: Battery SOC (24 h)
+
+    # ── Inverter / ESS controls ────────────────────────────────────
+    - type: entities
+      title: Inverter
+      show_header_toggle: false
+      entities:
+        - entity: switch.sofar_ess_ess_enabled
+          name: ESS enabled
+        - entity: switch.sofar_ess_ess_charge_only
+          name: Charge only (excess)
+        - entity: number.sofar_ess_ess_kp
+          name: Kp
+        - entity: number.sofar_ess_ess_ki
+          name: Ki
+        - entity: number.sofar_ess_ess_deadband
+          name: Deadband (W)
+        - entity: number.sofar_ess_ess_min_delta
+          name: Min delta (W)
+        - type: divider
+        - entity: button.sofar_ess_standby
+          name: Standby
+        - entity: button.sofar_ess_auto
+          name: Auto
+        - entity: button.sofar_ess_reset_integral
+          name: Reset integral
+
+    # ── Smart overnight charging ───────────────────────────────────
+    - type: entities
+      title: Smart overnight charge (00:30–05:30 @ 9.5p)
+      show_header_toggle: false
+      entities:
+        - entity: input_boolean.smart_charge_enabled
+          name: Automation enabled
+        - entity: sensor.smart_charge_status
+          name: Status
+        - entity: sensor.smart_charge_decision_reason
+          name: Decision
+        - entity: sensor.smart_charge_target_soc
+          name: Target SOC (live calc)
+        - entity: input_number.smart_charge_locked_target_soc
+          name: Locked overnight target
+        - type: divider
+        - entity: sensor.energy_production_tomorrow
+          name: Forecast tomorrow
+        - entity: sensor.energy_production_today
+          name: Forecast today
+        - entity: sensor.smart_charge_corrected_forecast
+          name: Corrected tomorrow
+        - entity: input_number.smart_charge_learned_demand_kwh
+          name: Learned daily demand
+        - entity: input_number.smart_charge_forecast_correction
+          name: Forecast correction
+        - type: divider
+        - entity: input_number.smart_charge_min_soc
+          name: Min SOC
+        - entity: input_number.smart_charge_max_soc
+          name: Max overnight SOC
+        - entity: input_number.smart_charge_battery_kwh
+          name: Battery capacity
+        - entity: input_number.smart_charge_power_w
+          name: Charge power
+        - type: divider
+        - entity: script.smart_charge_evaluate_now
+          name: Recalculate / apply now
+        - entity: script.smart_charge_stop_and_restore_ess
+          name: Stop & restore full ESS
+
+    # ── Today’s energy ─────────────────────────────────────────────
+    - type: entities
+      title: Today
+      show_header_toggle: false
+      entities:
+        - entity: sensor.opendtu_60d84c_yield_day
+          name: Solar yield
+        - entity: sensor.grid_energy_imported_daily
+          name: Grid import
+        - entity: sensor.grid_energy_exported_daily
+          name: Grid export
+        - entity: sensor.smart_charge_load_energy_daily
+          name: House load (est.)
+        - entity: sensor.hms_1600_4t_temperature
+          name: Inverter temp
+        - entity: sensor.opendtu_60d84c_yield_total
+          name: Solar lifetime
+
+    # ── History ────────────────────────────────────────────────────
+    - type: history-graph
+      title: Power (24 h)
+      hours_to_show: 24
+      entities:
+        - entity: sensor.opendtu_60d84c_ac_power
+          name: Solar
+        - entity: sensor.sofar_ess_grid_power
+          name: Grid
+        - entity: sensor.load_power
+          name: Load
+
+    - type: statistics-graph
+      title: Hourly averages (24 h)
+      days_to_show: 1
+      period: hour
+      chart_type: line
+      stat_types:
+        - mean
+      entities:
+        - entity: sensor.opendtu_60d84c_ac_power
+          name: Solar
+        - entity: sensor.sofar_ess_grid_power
+          name: Grid
+        - entity: sensor.load_power
+          name: Load

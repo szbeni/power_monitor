@@ -1,0 +1,496 @@
+ # Sofar ESS — smart overnight charging (Home Assistant package)
+#
+# Install:
+#   1. In configuration.yaml enable packages, e.g.:
+#        homeassistant:
+#          packages: !include_dir_named packages
+#   2. Copy this file to config/packages/smart_energy.yaml
+#   3. Developer Tools → YAML → Check configuration → Restart HA
+#   4. Confirm Forecast.Solar entities exist
+#   5. Leave Automation enabled OFF, run "Recalculate / apply now" once to dry-run
+#   6. Enable Automation when the Decision / Target look sensible
+#
+# Cheap window: 00:30–05:30 @ 9.5p/kWh; rest of day 33.42p.
+# After midnight the day-ahead solar sensor is energy_production_today
+# (energy_production_tomorrow is the following day — used for evening preview).
+#
+# Edit FORECAST entities below if your Forecast.Solar IDs differ.
+
+input_boolean:
+  smart_charge_enabled:
+    name: Smart overnight charge
+    icon: mdi:battery-charging-wireless
+    # Stay off until dry-run looks correct
+  smart_charge_session_active:
+    name: Smart charge session active
+    icon: mdi:timer-sand
+
+input_number:
+  smart_charge_min_soc:
+    name: Smart charge min SOC
+    min: 5
+    max: 50
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:battery-20
+    initial: 20
+    mode: box
+  smart_charge_max_soc:
+    name: Smart charge max overnight SOC
+    min: 40
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:battery-80
+    initial: 80
+    mode: box
+  smart_charge_battery_kwh:
+    name: Smart charge battery capacity
+    min: 1
+    max: 40
+    step: 0.1
+    unit_of_measurement: kWh
+    icon: mdi:battery
+    initial: 10
+    mode: box
+  smart_charge_power_w:
+    name: Smart charge power
+    min: 200
+    max: 3600
+    step: 50
+    unit_of_measurement: W
+    icon: mdi:flash
+    initial: 2500
+    mode: box
+  smart_charge_learned_demand_kwh:
+    name: Smart charge learned daily demand
+    min: 1
+    max: 80
+    step: 0.1
+    unit_of_measurement: kWh
+    icon: mdi:home-lightning-bolt
+    initial: 12
+    mode: box
+  smart_charge_forecast_correction:
+    name: Smart charge forecast correction
+    min: 0.5
+    max: 1.5
+    step: 0.01
+    icon: mdi:chart-line
+    initial: 1.0
+    mode: box
+  smart_charge_locked_target_soc:
+    name: Smart charge locked overnight target
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:target
+    initial: 20
+    mode: box
+  smart_charge_saved_day_forecast:
+    name: Smart charge saved day forecast
+    min: 0
+    max: 100
+    step: 0.01
+    unit_of_measurement: kWh
+    icon: mdi:weather-sunny
+    initial: 0
+    mode: box
+
+input_text:
+  smart_charge_status:
+    name: Smart charge status
+    max: 80
+    initial: idle
+    icon: mdi:information-outline
+  smart_charge_decision_reason:
+    name: Smart charge decision reason
+    max: 255
+    initial: "Waiting for first evaluation"
+    icon: mdi:text
+
+# Load energy from power (Wh → kWh via unit_prefix)
+sensor:
+  - platform: integration
+    source: sensor.load_power
+    name: Smart Charge Load Energy
+    unique_id: smart_charge_load_energy
+    unit_prefix: k
+    round: 3
+    method: left
+
+utility_meter:
+  smart_charge_load_energy_daily:
+    unique_id: smart_charge_load_energy_daily
+    source: sensor.smart_charge_load_energy
+    name: Smart Charge Load Energy Daily
+    cycle: daily
+
+template:
+  - sensor:
+      - name: Smart Charge Status
+        unique_id: smart_charge_status_sensor
+        icon: mdi:information-outline
+        state: "{{ states('input_text.smart_charge_status') }}"
+
+      - name: Smart Charge Decision Reason
+        unique_id: smart_charge_decision_reason_sensor
+        icon: mdi:text
+        state: "{{ states('input_text.smart_charge_decision_reason') }}"
+
+      - name: Smart Charge Forecast Entity
+        unique_id: smart_charge_forecast_entity
+        icon: mdi:weather-partly-cloudy
+        # After midnight prefer today (day ahead); evenings prefer tomorrow.
+        # Fall back to the other Forecast.Solar sensor if one is missing.
+        state: >-
+          {% set today = 'sensor.energy_production_today' %}
+          {% set tomorrow = 'sensor.energy_production_tomorrow' %}
+          {% set primary = today if now().hour < 12 else tomorrow %}
+          {% set secondary = tomorrow if primary == today else today %}
+          {% if states(primary) not in ['unknown', 'unavailable', 'none', ''] %}
+            {{ primary }}
+          {% elif states(secondary) not in ['unknown', 'unavailable', 'none', ''] %}
+            {{ secondary }}
+          {% else %}
+            {{ primary }}
+          {% endif %}
+
+      - name: Smart Charge Corrected Forecast
+        unique_id: smart_charge_corrected_forecast
+        unit_of_measurement: kWh
+        device_class: energy
+        icon: mdi:solar-power
+        state: >-
+          {% set ent = states('sensor.smart_charge_forecast_entity') %}
+          {% set raw = states(ent) %}
+          {% if raw in ['unknown', 'unavailable', 'none', ''] %}
+            unavailable
+          {% else %}
+            {% set corr = states('input_number.smart_charge_forecast_correction') | float(1) %}
+            {{ (raw | float(0) * corr) | round(2) }}
+          {% endif %}
+
+      - name: Smart Charge Target SOC
+        unique_id: smart_charge_target_soc
+        unit_of_measurement: "%"
+        icon: mdi:battery-heart
+        state: >-
+          {% set ent = states('sensor.smart_charge_forecast_entity') %}
+          {% set raw = states(ent) %}
+          {% set min_soc = states('input_number.smart_charge_min_soc') | float(20) %}
+          {% set max_soc = states('input_number.smart_charge_max_soc') | float(80) %}
+          {% set demand = states('input_number.smart_charge_learned_demand_kwh') | float(12) %}
+          {% set cap = states('input_number.smart_charge_battery_kwh') | float(10) %}
+          {% set corr = states('input_number.smart_charge_forecast_correction') | float(1) %}
+          {% if raw in ['unknown', 'unavailable', 'none', ''] or cap <= 0 %}
+            {{ max_soc | int }}
+          {% else %}
+            {% set solar = raw | float(0) * corr %}
+            {% set deficit = [0, demand - solar] | max %}
+            {% set need = (deficit / cap) * 100 %}
+            {% set target = [[need, min_soc] | max, max_soc] | min %}
+            {{ target | round(0) | int }}
+          {% endif %}
+        attributes:
+          forecast_entity: "{{ states('sensor.smart_charge_forecast_entity') }}"
+          forecast_raw: >-
+            {% set ent = states('sensor.smart_charge_forecast_entity') %}
+            {{ states(ent) }}
+          corrected_kwh: "{{ states('sensor.smart_charge_corrected_forecast') }}"
+          demand_kwh: "{{ states('input_number.smart_charge_learned_demand_kwh') }}"
+          fallback: >-
+            {% set ent = states('sensor.smart_charge_forecast_entity') %}
+            {% set raw = states(ent) %}
+            {{ raw in ['unknown', 'unavailable', 'none', ''] }}
+
+script:
+  smart_charge_set_status:
+    alias: Smart charge set status
+    mode: queued
+    fields:
+      status:
+        required: true
+        selector:
+          text:
+      reason:
+        required: true
+        selector:
+          text:
+    sequence:
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.smart_charge_status
+        data:
+          value: "{{ status }}"
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.smart_charge_decision_reason
+        data:
+          value: "{{ reason }}"
+
+  smart_charge_command_charge:
+    alias: Smart charge command charge
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: sofaress/set/charge
+          payload: "{{ states('input_number.smart_charge_power_w') | int }}"
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.smart_charge_session_active
+
+  smart_charge_command_standby:
+    alias: Smart charge command standby
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: sofaress/set/standby
+          payload: "true"
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.smart_charge_session_active
+
+  smart_charge_restore_full_ess:
+    alias: Smart charge restore full ESS
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: sofaress/set/ess
+          payload: "full"
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.smart_charge_session_active
+
+  smart_charge_stop_and_restore_ess:
+    alias: Smart charge stop and restore ESS
+    mode: single
+    icon: mdi:battery-off
+    sequence:
+      - service: script.smart_charge_restore_full_ess
+      - service: script.smart_charge_set_status
+        data:
+          status: idle
+          reason: "Manual stop — full ESS restored"
+
+  smart_charge_evaluate_now:
+    alias: Smart charge evaluate now
+    mode: restart
+    icon: mdi:calculator-variant
+    sequence:
+      - variables:
+          soc_raw: "{{ states('sensor.sofar_ess_battery_soc') }}"
+          forecast_ent: "{{ states('sensor.smart_charge_forecast_entity') }}"
+          forecast_raw: "{{ states(states('sensor.smart_charge_forecast_entity')) }}"
+          target_live: "{{ states('sensor.smart_charge_target_soc') | int(80) }}"
+          min_soc: "{{ states('input_number.smart_charge_min_soc') | float(20) }}"
+          max_soc: "{{ states('input_number.smart_charge_max_soc') | float(80) }}"
+          demand: "{{ states('input_number.smart_charge_learned_demand_kwh') | float(12) }}"
+          corr: "{{ states('input_number.smart_charge_forecast_correction') | float(1) }}"
+          fallback: "{{ states(states('sensor.smart_charge_forecast_entity')) in ['unknown', 'unavailable', 'none', ''] }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ soc_raw in ['unknown', 'unavailable', 'none', ''] }}"
+            sequence:
+              - service: script.smart_charge_command_standby
+              - service: script.smart_charge_set_status
+                data:
+                  status: error
+                  reason: "SOC unavailable — standby for safety"
+        default:
+          - variables:
+              soc: "{{ soc_raw | float(0) }}"
+              target: >-
+                {% if fallback | bool %}
+                  {{ max_soc | int }}
+                {% else %}
+                  {{ target_live | int }}
+                {% endif %}
+              reason: >-
+                {% if fallback | bool %}
+                  Forecast missing ({{ forecast_ent }}) — fallback to max {{ max_soc | int }}%
+                {% else %}
+                  {% set solar = (forecast_raw | float(0) * corr | float(1)) | round(2) %}
+                  Forecast {{ forecast_raw }} kWh × {{ corr }} = {{ solar }} kWh vs demand {{ demand }} kWh → target {{ target }}%
+                {% endif %}
+          - service: input_number.set_value
+            target:
+              entity_id: input_number.smart_charge_locked_target_soc
+            data:
+              value: "{{ target }}"
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ not is_state('input_boolean.smart_charge_enabled', 'on') }}"
+                sequence:
+                  - service: script.smart_charge_set_status
+                    data:
+                      status: dry-run
+                      reason: "{{ reason }} (automation off — no inverter command)"
+              - conditions:
+                  - condition: template
+                    value_template: "{{ soc | float < target | float }}"
+                sequence:
+                  - service: script.smart_charge_command_charge
+                  - service: script.smart_charge_set_status
+                    data:
+                      status: charging
+                      reason: "{{ reason }} | SOC {{ soc | round(0) }}% < {{ target }}% — charging"
+            default:
+              - service: script.smart_charge_command_standby
+              - service: script.smart_charge_set_status
+                data:
+                  status: holding
+                  reason: "{{ reason }} | SOC {{ soc | round(0) }}% ≥ {{ target }}% — standby"
+
+automation:
+  - id: smart_charge_cheap_window_start
+    alias: Smart charge cheap window start
+    description: At 00:30 lock target from day-ahead forecast and charge or hold.
+    mode: single
+    trigger:
+      - platform: time
+        at: "00:30:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.smart_charge_enabled
+        state: "on"
+    action:
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_saved_day_forecast
+        data:
+          value: >-
+            {% set t = states('sensor.energy_production_today') %}
+            {{ t | float(0) if t not in ['unknown', 'unavailable', ''] else 0 }}
+      - service: script.smart_charge_evaluate_now
+
+  - id: smart_charge_reach_target
+    alias: Smart charge stop at target SOC
+    description: During cheap window, stop charging when locked target is reached.
+    mode: single
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.sofar_ess_battery_soc
+        above: input_number.smart_charge_locked_target_soc
+    condition:
+      - condition: state
+        entity_id: input_boolean.smart_charge_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.smart_charge_session_active
+        state: "on"
+      - condition: time
+        after: "00:30:00"
+        before: "05:30:00"
+    action:
+      - service: script.smart_charge_command_standby
+      - service: script.smart_charge_set_status
+        data:
+          status: holding
+          reason: >-
+            Reached target {{ states('input_number.smart_charge_locked_target_soc') }}% — standby until 05:30
+
+  - id: smart_charge_cheap_window_end
+    alias: Smart charge cheap window end
+    description: At 05:30 restore full bidirectional ESS.
+    mode: single
+    trigger:
+      - platform: time
+        at: "05:30:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.smart_charge_enabled
+        state: "on"
+    action:
+      - service: script.smart_charge_restore_full_ess
+      - service: script.smart_charge_set_status
+        data:
+          status: idle
+          reason: "Cheap window ended — full ESS restored"
+
+  - id: smart_charge_ha_start_recovery
+    alias: Smart charge HA start recovery
+    description: If HA restarts inside the cheap window, re-evaluate safely.
+    mode: single
+    trigger:
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: input_boolean.smart_charge_enabled
+        state: "on"
+      - condition: time
+        after: "00:30:00"
+        before: "05:30:00"
+    action:
+      - delay: "00:00:30"
+      - service: script.smart_charge_evaluate_now
+
+  - id: smart_charge_soc_unavailable_guard
+    alias: Smart charge SOC unavailable guard
+    description: Never keep charging if SOC goes unavailable mid-session.
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: sensor.sofar_ess_battery_soc
+        to:
+          - unavailable
+          - unknown
+    condition:
+      - condition: state
+        entity_id: input_boolean.smart_charge_session_active
+        state: "on"
+    action:
+      - service: script.smart_charge_command_standby
+      - service: script.smart_charge_set_status
+        data:
+          status: error
+          reason: "SOC became unavailable — forced standby"
+
+  - id: smart_charge_learn_demand
+    alias: Smart charge learn daily demand
+    description: Smooth learned household demand from estimated daily load energy.
+    mode: single
+    trigger:
+      - platform: time
+        at: "23:50:00"
+    action:
+      - variables:
+          today: "{{ states('sensor.smart_charge_load_energy_daily') | float(0) }}"
+          old: "{{ states('input_number.smart_charge_learned_demand_kwh') | float(12) }}"
+          blended: "{{ (0.7 * old + 0.3 * today) | round(2) }}"
+      - condition: template
+        value_template: "{{ today > 0.5 }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_learned_demand_kwh
+        data:
+          value: "{{ blended }}"
+
+  - id: smart_charge_learn_forecast_bias
+    alias: Smart charge learn forecast bias
+    description: Compare today's solar yield vs morning forecast; nudge correction factor.
+    mode: single
+    trigger:
+      - platform: time
+        at: "23:55:00"
+    action:
+      - variables:
+          predicted: "{{ states('input_number.smart_charge_saved_day_forecast') | float(0) }}"
+          actual: "{{ states('sensor.opendtu_60d84c_yield_day') | float(0) }}"
+          old: "{{ states('input_number.smart_charge_forecast_correction') | float(1) }}"
+          ratio: "{{ (actual / predicted) if predicted > 0.5 and actual > 0.5 else 1 }}"
+          blended: "{{ [[0.5, (0.8 * old + 0.2 * ratio)] | max, 1.5] | min | round(2) }}"
+      - condition: template
+        value_template: "{{ predicted > 0.5 and actual > 0.5 }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_forecast_correction
+        data:
+          value: "{{ blended }}"

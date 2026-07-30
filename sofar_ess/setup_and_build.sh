@@ -57,7 +57,7 @@ if ! command -v pio >/dev/null 2>&1; then
     PATH="$HOME/.local/bin:$PATH"
   else
     echo "==> Installing PlatformIO..."
-    python3 -m pip install --user -U platformio
+    python3 -m pip install -U platformio
     export PATH="$HOME/.local/bin:$PATH"
   fi
 fi

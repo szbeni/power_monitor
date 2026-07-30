@@ -12,6 +12,8 @@ Every ~500 ms:
 
 Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator freezes in the deadband, uses measured `dt`, and has anti-windup at ±MAX.
 
+**Charge-only mode** clamps the ESS command to ≤ 0 W: charge from export / excess, standby on import — never discharge. Toggle via MQTT or HA.
+
 Inverter must be in **Passive Mode** (same requirement as Sofar2mqtt).
 
 ## Wiring (ESP32-C3 SuperMini)
@@ -96,12 +98,14 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/ess/command_w` | pub | Last ESS setpoint sent to Sofar (+discharge / −charge / 0=standby) |
 | `…/ess/mode` | pub | Last Sofar mode string: `standby` / `charge` / `discharge` / `auto` / `unknown` |
 | `…/ess/enabled` | pub | `true` if closed-loop ESS is running; `false` if manual-only |
+| `…/ess/charge_only` | pub | `true` if ESS may only charge (cmd ≤ 0); `false` = bidirectional |
 | `…/ess/kp` | pub | PI proportional gain (retained) |
 | `…/ess/ki` | pub | PI integral gain in 1/s (retained) |
 | `…/ess/deadband` | pub | ESS deadband watts (retained) |
 | `…/ess/min_delta` | pub | Min command change watts (retained) |
 | `…/ess/integral` | pub | Current integrator state |
-| `…/set/ess` | sub | `true` / `false` — enable or disable the closed-loop ESS |
+| `…/set/ess` | sub | `true` / `false` — enable/disable; `charge_only` = enable + soak-only; `full` = enable + bidirectional |
+| `…/set/charge_only` | sub | `true` / `false` — clamp ESS to charge/standby only (cmd ≤ 0) |
 | `…/set/kp` | sub | float 0…5 — set Kp live |
 | `…/set/ki` | sub | float 0…5 — set Ki live (1/s) |
 | `…/set/deadband` | sub | float 0…500 — deadband watts |
@@ -126,6 +130,7 @@ mosquitto_pub -t sofaress/set/min_delta -m 10
 | Field | Meaning |
 | ----- | ------- |
 | `ess_enabled` | Closed-loop ESS on/off |
+| `ess_charge_only` | Charge-from-excess only (no discharge commands) |
 | `grid_power_w` | JSY residual grid power (W) |
 | `energy_import_wh` / `energy_export_wh` | JSY energy totals |
 | `ess_command_w` | Last commanded battery offset (W) |
@@ -139,18 +144,65 @@ mosquitto_pub -t sofaress/set/min_delta -m 10
 | `sofar_grid_raw` | Raw Sofar grid-power register |
 | `sofar_ok` | Present as `false` if Sofar data never read successfully |
 
-Manual `/set/charge|discharge|standby|auto` turns ESS off so you can take over; publish `…/set/ess` `true` to resume the loop.
+Manual `/set/charge|discharge|standby|auto` turns ESS off so you can take over; publish `…/set/ess` `true` to resume the loop (or `charge_only` to resume soak-only).
+
+Example charge-only:
+```bash
+mosquitto_pub -t sofaress/set/ess -m charge_only
+# or with ESS already on:
+mosquitto_pub -t sofaress/set/charge_only -m true
+```
 
 ## Home Assistant
 
 With MQTT discovery enabled (`HA_MQTT_DISCOVERY=1`, default), device **Sofar ESS** appears when MQTT connects.
 
 - Sensors: grid / battery power, ESS command, SOC, energy import/export, Sofar mode, run state  
-- Switch: ESS enabled  
+- Switch: ESS enabled, ESS charge only  
 - Numbers: ESS Kp, ESS Ki, Deadband, Min Delta  
 - Buttons: Standby, Auto, Reset Integral  
 
 See the MQTT section above for what each mode/topic means. Requires the HA MQTT integration (discovery prefix `homeassistant`). Re-flash / reconnect MQTT to refresh discovery.
+
+### Dashboard + smart overnight charging
+
+Repo files (copy into Home Assistant, do not expect the ESP to serve them):
+
+| File | Purpose |
+| ---- | ------- |
+| [`ha-bashboard.yaml`](ha-bashboard.yaml) | Compact Energy Lovelace view (live + inverter + smart charge + history) |
+| [`ha-smart-energy-package.yaml`](ha-smart-energy-package.yaml) | Helpers, sensors, scripts, and automations for forecast-based cheap-window charging |
+
+**Forecast.Solar:** overnight decisions use day-ahead production. After midnight that is usually `sensor.energy_production_today` (falling back to `sensor.energy_production_tomorrow` if needed). Evenings preview tomorrow’s forecast on the dashboard.
+
+**Cheap window:** 00:30–05:30 (9.5p/kWh). Outside that window the package restores full bidirectional ESS (`sofaress/set/ess` → `full`).
+
+Setup:
+
+1. Enable packages in `configuration.yaml`:
+   ```yaml
+   homeassistant:
+     packages: !include_dir_named packages
+   ```
+2. Copy `ha-smart-energy-package.yaml` → `config/packages/smart_energy.yaml`
+3. Check configuration and restart Home Assistant
+4. Paste `ha-bashboard.yaml` as a Lovelace view (Raw configuration editor)
+5. Set **Battery capacity**, **Learned daily demand**, and charge power on the dashboard
+6. Keep **Automation enabled** off, run **Recalculate / apply now** — status should show `dry-run` and a Decision reason
+7. When the target looks right, turn **Automation enabled** on
+
+Behaviour (when automation is on):
+
+- **00:30** — lock overnight target SOC from corrected forecast vs learned demand; charge if SOC is below target, otherwise standby  
+- **Reach target** — stop charging (standby) until the window ends  
+- **05:30** — restore full ESS  
+- **HA restart** inside the window — re-evaluate after 30 s  
+- **SOC unavailable** — force standby  
+- **~23:50** — blend learned demand from estimated house load energy  
+- **~23:55** — nudge forecast correction from OpenDTU daily yield vs morning forecast  
+
+Defaults: min SOC 20%, max overnight 80%, charge 2500 W. Formula:  
+`target% = clamp(max(min%, (demand − forecast×correction) / capacity × 100), max%)` — sunny days stay near min; cloudy days raise the overnight SOC.
 
 ## PlotJuggler
 
