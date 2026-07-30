@@ -14,6 +14,8 @@ Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator fr
 
 **Charge-only mode** clamps the ESS command to ≤ 0 W: charge from export / excess, standby on import — never discharge. Toggle via MQTT or HA.
 
+**SOC protect** (daytime ESS only, separate from overnight smart charging): when bidirectional ESS is running, SOC below the **low threshold** forces charge-only (no discharge); bidirectional resumes once SOC reaches **low + hysteresis** (default 20% / +5%). Tunable via MQTT or HA.
+
 Inverter must be in **Passive Mode** (same requirement as Sofar2mqtt).
 
 ## Wiring (ESP32-C3 SuperMini)
@@ -98,14 +100,22 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/ess/command_w` | pub | Last ESS setpoint sent to Sofar (+discharge / −charge / 0=standby) |
 | `…/ess/mode` | pub | Last Sofar mode string: `standby` / `charge` / `discharge` / `auto` / `unknown` |
 | `…/ess/enabled` | pub | `true` if closed-loop ESS is running; `false` if manual-only |
-| `…/ess/charge_only` | pub | `true` if ESS may only charge (cmd ≤ 0); `false` = bidirectional |
+| `…/ess/charge_only` | pub | User charge-only preference (`true` / `false`, retained) |
+| `…/ess/effective_charge_only` | pub | Effective charge-only (user **or** SOC protect, retained) |
+| `…/ess/soc_protect/enabled` | pub | SOC protect on/off (retained) |
+| `…/ess/soc_protect/low` | pub | Low SOC threshold % — below this, ESS goes charge-only (retained) |
+| `…/ess/soc_protect/hyst` | pub | Hysteresis % — bidirectional resumes at low + hyst (retained) |
+| `…/ess/soc_protect/active` | pub | `true` when SOC protect has forced charge-only |
 | `…/ess/kp` | pub | PI proportional gain (retained) |
 | `…/ess/ki` | pub | PI integral gain in 1/s (retained) |
 | `…/ess/deadband` | pub | ESS deadband watts (retained) |
 | `…/ess/min_delta` | pub | Min command change watts (retained) |
 | `…/ess/integral` | pub | Current integrator state |
 | `…/set/ess` | sub | `true` / `false` — enable/disable; `charge_only` = enable + soak-only; `full` = enable + bidirectional |
-| `…/set/charge_only` | sub | `true` / `false` — clamp ESS to charge/standby only (cmd ≤ 0) |
+| `…/set/charge_only` | sub | `true` / `false` — user charge-only preference (cmd ≤ 0) |
+| `…/set/soc_protect` | sub | `true` / `false` — enable SOC-based charge-only protect |
+| `…/set/soc_protect_low` | sub | int 1…100 — low SOC threshold % |
+| `…/set/soc_protect_hyst` | sub | int 0…30 — hysteresis % above low before bidirectional resumes |
 | `…/set/kp` | sub | float 0…5 — set Kp live |
 | `…/set/ki` | sub | float 0…5 — set Ki live (1/s) |
 | `…/set/deadband` | sub | float 0…500 — deadband watts |
@@ -114,6 +124,8 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/set/standby` | sub | `true` — force standby (battery idle). **Disables ESS** |
 | `…/set/auto` | sub | `true` — Sofar auto (inverter self-control). **Disables ESS** |
 | `…/set/charge` | sub | watts (1…MAX) — force charge. **Disables ESS** |
+| `…/set/charge_target_soc` | sub | int 0…100 — stop manual charge at this SOC and go standby (0 = no limit) |
+| `…/charge/target_soc` | pub | Current charge target SOC % (retained; 0 = no limit) |
 | `…/set/discharge` | sub | watts (1…MAX) — force discharge. **Disables ESS** |
 | `…/response/<cmd>` | pub | `0` = OK after a manual set command |
 
@@ -130,7 +142,10 @@ mosquitto_pub -t sofaress/set/min_delta -m 10
 | Field | Meaning |
 | ----- | ------- |
 | `ess_enabled` | Closed-loop ESS on/off |
-| `ess_charge_only` | Charge-from-excess only (no discharge commands) |
+| `ess_charge_only` | User charge-only preference |
+| `ess_effective_charge_only` | Effective charge-only (user or SOC protect) |
+| `ess_soc_protect_enabled` / `ess_soc_protect_low` / `ess_soc_protect_hyst` | SOC protect config |
+| `ess_soc_protect_active` | SOC protect currently forcing charge-only |
 | `grid_power_w` | JSY residual grid power (W) |
 | `energy_import_wh` / `energy_export_wh` | JSY energy totals |
 | `ess_command_w` | Last commanded battery offset (W) |
@@ -138,6 +153,7 @@ mosquitto_pub -t sofaress/set/min_delta -m 10
 | `ess_deadband_w` / `ess_min_delta_w` | Live deadband / min command delta |
 | `ess_integral` | Integrator state |
 | `sofar_mode` | `standby` / `charge` / `discharge` / `auto` / `unknown` |
+| `charge_target_soc` | Manual charge stop target % (0 = no limit) |
 | `run_state` | Sofar run-state register (when RS485 OK) |
 | `battery_soc` | Battery state of charge % |
 | `battery_power_w` | Measured battery power (W) |
@@ -158,8 +174,9 @@ mosquitto_pub -t sofaress/set/charge_only -m true
 With MQTT discovery enabled (`HA_MQTT_DISCOVERY=1`, default), device **Sofar ESS** appears when MQTT connects.
 
 - Sensors: grid / battery power, ESS command, SOC, energy import/export, Sofar mode, run state  
-- Switch: ESS enabled, ESS charge only  
-- Numbers: ESS Kp, ESS Ki, Deadband, Min Delta  
+- Switch: ESS enabled, ESS charge only, ESS SOC protect  
+- Binary sensor: ESS SOC protect active  
+- Numbers: ESS Kp, ESS Ki, Deadband, Min Delta, SOC protect low, SOC protect hysteresis  
 - Buttons: Standby, Auto, Reset Integral  
 
 See the MQTT section above for what each mode/topic means. Requires the HA MQTT integration (discovery prefix `homeassistant`). Re-flash / reconnect MQTT to refresh discovery.
@@ -193,10 +210,13 @@ Setup:
 
 Behaviour (when automation is on):
 
-- **00:30** — lock overnight target SOC from corrected forecast vs learned demand; charge if SOC is below target, otherwise standby  
-- **Reach target** — stop charging (standby) until the window ends  
-- **05:30** — restore full ESS  
+- **00:30** — lock overnight target SOC from corrected forecast vs learned demand; charge if SOC is below target (firmware stops at target SOC), otherwise standby  
+- **Reach target** — stop charging (standby) until the window ends — enforced in firmware via `set/charge_target_soc` and mirrored in HA  
+- **05:30** — restore full ESS for the rest of the day  
+- **Outside cheap window** — full bidirectional ESS whenever automation is enabled  
+- **Enable mid-window** — re-evaluate and charge or hold  
 - **HA restart** inside the window — re-evaluate after 30 s  
+- **HA restart** outside the window — restore full ESS after 30 s  
 - **SOC unavailable** — force standby  
 - **~23:50** — blend learned demand from estimated house load energy  
 - **~23:55** — nudge forecast correction from OpenDTU daily yield vs morning forecast  

@@ -79,6 +79,17 @@
 #define ESS_CHARGE_ONLY 0
 #endif
 
+// SOC protect: below low threshold ESS becomes charge-only; resumes bidirectional at low+hyst.
+#ifndef ESS_SOC_PROTECT_ENABLE
+#define ESS_SOC_PROTECT_ENABLE 1
+#endif
+#ifndef ESS_SOC_PROTECT_LOW
+#define ESS_SOC_PROTECT_LOW 15
+#endif
+#ifndef ESS_SOC_PROTECT_HYST
+#define ESS_SOC_PROTECT_HYST 5
+#endif
+
 // How often to sample JSY snapshot and update Sofar (ms).
 // ~500 ms tracks MycilaJSY @ 38400 (~330 ms change detect) without flooding RS485.
 #ifndef ESS_LOOP_INTERVAL_MS
@@ -87,12 +98,12 @@
 
 // Deadband around 0 W — freeze integrator / avoid chatter
 #ifndef ESS_DEADBAND_W
-#define ESS_DEADBAND_W 20
+#define ESS_DEADBAND_W 10
 #endif
 
 // Minimum command change before re-sending to inverter (W)
 #ifndef ESS_MIN_DELTA_W
-#define ESS_MIN_DELTA_W 10
+#define ESS_MIN_DELTA_W 5
 #endif
 
 // Re-send same setpoint at least this often (ms) so inverter stays in mode
@@ -103,10 +114,10 @@
 // PI gains for zero-export (Ts = ESS_LOOP_INTERVAL_MS). Tunable via MQTT set/kp|ki.
 // u = Kp*e + Ki*∫e  with e = grid_power_w (+import → +discharge).
 #ifndef ESS_KP
-#define ESS_KP 0.4f
+#define ESS_KP 0.2f
 #endif
 #ifndef ESS_KI
-#define ESS_KI 0.3f
+#define ESS_KI 0.1f
 #endif
 
 #ifndef HEARTBEAT_INTERVAL_MS

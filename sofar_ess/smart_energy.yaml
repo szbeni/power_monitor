@@ -10,7 +10,8 @@
 #   5. Leave Automation enabled OFF, run "Recalculate / apply now" once to dry-run
 #   6. Enable Automation when the Decision / Target look sensible
 #
-# Cheap window: 00:30–05:30 @ 9.5p/kWh; rest of day 33.42p.
+# Cheap window: 00:30–05:30 @ 9.5p/kWh; rest of day full ESS (33.42p).
+# Charge uses sofaress/set/charge + set/charge_target_soc; firmware stops at target → standby.
 # After midnight the day-ahead solar sensor is energy_production_today
 # (energy_production_tomorrow is the following day — used for evening preview).
 #
@@ -236,6 +237,10 @@ script:
     sequence:
       - service: mqtt.publish
         data:
+          topic: sofaress/set/charge_target_soc
+          payload: "{{ states('input_number.smart_charge_locked_target_soc') | int }}"
+      - service: mqtt.publish
+        data:
           topic: sofaress/set/charge
           payload: "{{ states('input_number.smart_charge_power_w') | int }}"
       - service: input_boolean.turn_on
@@ -246,6 +251,10 @@ script:
     alias: Smart charge command standby
     mode: single
     sequence:
+      - service: mqtt.publish
+        data:
+          topic: sofaress/set/charge_target_soc
+          payload: "0"
       - service: mqtt.publish
         data:
           topic: sofaress/set/standby
@@ -333,20 +342,34 @@ script:
                       status: dry-run
                       reason: "{{ reason }} (automation off — no inverter command)"
               - conditions:
-                  - condition: template
-                    value_template: "{{ soc | float < target | float }}"
+                  - condition: or
+                    conditions:
+                      - condition: time
+                        after: "00:30:00"
+                        before: "05:30:00"
                 sequence:
-                  - service: script.smart_charge_command_charge
-                  - service: script.smart_charge_set_status
-                    data:
-                      status: charging
-                      reason: "{{ reason }} | SOC {{ soc | round(0) }}% < {{ target }}% — charging"
+                  - choose:
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ soc | float < target | float }}"
+                        sequence:
+                          - service: script.smart_charge_command_charge
+                          - service: script.smart_charge_set_status
+                            data:
+                              status: charging
+                              reason: "{{ reason }} | SOC {{ soc | round(0) }}% < {{ target }}% — charging"
+                    default:
+                      - service: script.smart_charge_command_standby
+                      - service: script.smart_charge_set_status
+                        data:
+                          status: holding
+                          reason: "{{ reason }} | SOC {{ soc | round(0) }}% ≥ {{ target }}% — standby"
             default:
-              - service: script.smart_charge_command_standby
+              - service: script.smart_charge_restore_full_ess
               - service: script.smart_charge_set_status
                 data:
-                  status: holding
-                  reason: "{{ reason }} | SOC {{ soc | round(0) }}% ≥ {{ target }}% — standby"
+                  status: idle
+                  reason: "Outside cheap window — full ESS active"
 
 automation:
   - id: smart_charge_cheap_window_start
@@ -372,12 +395,15 @@ automation:
 
   - id: smart_charge_reach_target
     alias: Smart charge stop at target SOC
-    description: During cheap window, stop charging when locked target is reached.
+    description: During cheap window, update status when target SOC is reached (firmware also stops charge).
     mode: single
     trigger:
       - platform: numeric_state
         entity_id: sensor.sofar_ess_battery_soc
         above: input_number.smart_charge_locked_target_soc
+      - platform: state
+        entity_id: sensor.sofar_ess_sofar_mode
+        to: standby
     condition:
       - condition: state
         entity_id: input_boolean.smart_charge_enabled
@@ -396,9 +422,24 @@ automation:
           reason: >-
             Reached target {{ states('input_number.smart_charge_locked_target_soc') }}% — standby until 05:30
 
+  - id: smart_charge_enable_in_window
+    alias: Smart charge enable during cheap window
+    description: If automation is turned on inside the cheap window, evaluate immediately.
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: input_boolean.smart_charge_enabled
+        to: "on"
+    condition:
+      - condition: time
+        after: "00:30:00"
+        before: "05:30:00"
+    action:
+      - service: script.smart_charge_evaluate_now
+
   - id: smart_charge_cheap_window_end
     alias: Smart charge cheap window end
-    description: At 05:30 restore full bidirectional ESS.
+    description: At 05:30 restore full bidirectional ESS for the rest of the day.
     mode: single
     trigger:
       - platform: time
@@ -413,6 +454,34 @@ automation:
         data:
           status: idle
           reason: "Cheap window ended — full ESS restored"
+
+  - id: smart_charge_daytime_ess
+    alias: Smart charge daytime ESS mode
+    description: Outside the cheap window, keep full bidirectional ESS when automation is on.
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: input_boolean.smart_charge_enabled
+        to: "on"
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: input_boolean.smart_charge_enabled
+        state: "on"
+      - condition: or
+        conditions:
+          - condition: time
+            before: "00:30:00"
+          - condition: time
+            after: "05:30:00"
+    action:
+      - delay: "00:00:30"
+      - service: script.smart_charge_restore_full_ess
+      - service: script.smart_charge_set_status
+        data:
+          status: idle
+          reason: "Automation on outside cheap window — full ESS active"
 
   - id: smart_charge_ha_start_recovery
     alias: Smart charge HA start recovery

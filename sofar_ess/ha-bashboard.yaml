@@ -1,171 +1,670 @@
-# Sofar ESS — Energy dashboard view
-# Paste as a Lovelace view (raw config), or merge into an existing dashboard.
-# Requires: MQTT-discovered Sofar ESS entities + packages/smart_energy.yaml
-# (see ha-smart-energy-package.yaml).
-
-- theme: Backend-selected
-  title: Energy
-  path: energy
-  icon: mdi:flash
-  badges: []
-  cards:
-    # ── Live overview ──────────────────────────────────────────────
-    - type: grid
-      columns: 4
-      square: false
-      cards:
-        - type: entity
-          entity: sensor.sofar_ess_grid_power
-          name: Grid
-        - type: entity
-          entity: sensor.opendtu_60d84c_ac_power
-          name: Solar
-        - type: entity
-          entity: sensor.load_power
-          name: Load
-        - type: entity
-          entity: sensor.sofar_ess_battery_power
-          name: Battery
-        - type: entity
-          entity: sensor.sofar_ess_battery_soc
-          name: SOC
-        - type: entity
-          entity: sensor.sofar_ess_ess_command
-          name: Command
-        - type: entity
-          entity: sensor.sofar_ess_sofar_mode
-          name: Mode
-        - type: entity
-          entity: sensor.smart_charge_status
-          name: Smart charge
-
-    - type: history-graph
-      title: Power (1 h)
-      hours_to_show: 1
-      entities:
-        - entity: sensor.opendtu_60d84c_ac_power
-          name: Solar
-        - entity: sensor.sofar_ess_grid_power
-          name: Grid
-        - entity: sensor.load_power
-          name: Load
-        - entity: sensor.sofar_ess_battery_power
-          name: Battery
-
-    - type: sensor
-      entity: sensor.sofar_ess_battery_soc
-      graph: line
-      detail: 1
-      hours_to_show: 24
-      name: Battery SOC (24 h)
-
-    # ── Inverter / ESS controls ────────────────────────────────────
-    - type: entities
-      title: Inverter
-      show_header_toggle: false
-      entities:
-        - entity: switch.sofar_ess_ess_enabled
-          name: ESS enabled
-        - entity: switch.sofar_ess_ess_charge_only
-          name: Charge only (excess)
-        - entity: number.sofar_ess_ess_kp
-          name: Kp
-        - entity: number.sofar_ess_ess_ki
-          name: Ki
-        - entity: number.sofar_ess_ess_deadband
-          name: Deadband (W)
-        - entity: number.sofar_ess_ess_min_delta
-          name: Min delta (W)
-        - type: divider
-        - entity: button.sofar_ess_standby
-          name: Standby
-        - entity: button.sofar_ess_auto
-          name: Auto
-        - entity: button.sofar_ess_reset_integral
-          name: Reset integral
-
-    # ── Smart overnight charging ───────────────────────────────────
-    - type: entities
-      title: Smart overnight charge (00:30–05:30 @ 9.5p)
-      show_header_toggle: false
-      entities:
-        - entity: input_boolean.smart_charge_enabled
-          name: Automation enabled
-        - entity: sensor.smart_charge_status
-          name: Status
-        - entity: sensor.smart_charge_decision_reason
-          name: Decision
-        - entity: sensor.smart_charge_target_soc
-          name: Target SOC (live calc)
-        - entity: input_number.smart_charge_locked_target_soc
-          name: Locked overnight target
-        - type: divider
-        - entity: sensor.energy_production_tomorrow
-          name: Forecast tomorrow
-        - entity: sensor.energy_production_today
-          name: Forecast today
-        - entity: sensor.smart_charge_corrected_forecast
-          name: Corrected tomorrow
-        - entity: input_number.smart_charge_learned_demand_kwh
-          name: Learned daily demand
-        - entity: input_number.smart_charge_forecast_correction
-          name: Forecast correction
-        - type: divider
-        - entity: input_number.smart_charge_min_soc
-          name: Min SOC
-        - entity: input_number.smart_charge_max_soc
-          name: Max overnight SOC
-        - entity: input_number.smart_charge_battery_kwh
-          name: Battery capacity
-        - entity: input_number.smart_charge_power_w
-          name: Charge power
-        - type: divider
-        - entity: script.smart_charge_evaluate_now
-          name: Recalculate / apply now
-        - entity: script.smart_charge_stop_and_restore_ess
-          name: Stop & restore full ESS
-
-    # ── Today’s energy ─────────────────────────────────────────────
-    - type: entities
-      title: Today
-      show_header_toggle: false
-      entities:
-        - entity: sensor.opendtu_60d84c_yield_day
-          name: Solar yield
-        - entity: sensor.grid_energy_imported_daily
-          name: Grid import
-        - entity: sensor.grid_energy_exported_daily
-          name: Grid export
-        - entity: sensor.smart_charge_load_energy_daily
-          name: House load (est.)
-        - entity: sensor.hms_1600_4t_temperature
-          name: Inverter temp
-        - entity: sensor.opendtu_60d84c_yield_total
-          name: Solar lifetime
-
-    # ── History ────────────────────────────────────────────────────
-    - type: history-graph
-      title: Power (24 h)
-      hours_to_show: 24
-      entities:
-        - entity: sensor.opendtu_60d84c_ac_power
-          name: Solar
-        - entity: sensor.sofar_ess_grid_power
-          name: Grid
-        - entity: sensor.load_power
-          name: Load
-
-    - type: statistics-graph
-      title: Hourly averages (24 h)
-      days_to_show: 1
-      period: hour
-      chart_type: line
-      stat_types:
-        - mean
-      entities:
-        - entity: sensor.opendtu_60d84c_ac_power
-          name: Solar
-        - entity: sensor.sofar_ess_grid_power
-          name: Grid
-        - entity: sensor.load_power
-          name: Load
+title: Home Mobile View
+views:
+  - title: Floorplan
+    path: floorplan
+    panel: true
+    theme: ""
+    badges: []
+    cards:
+      - type: vertical-stack
+        cards:
+          - type: picture-elements
+            image: local/floorplan/hendravean/ground_floor.png
+            elements:
+              - type: state-badge
+                title: ""
+                entity: sensor.trv_conservatory_temperature
+                tap_action:
+                  action: navigate
+                  navigation_path: /home-mobile-view/heating
+                style:
+                  color: transparent
+                  top: 17%
+                  left: 73%
+                  font-size: 17px
+                  transform: translate(-50%,-50%) scale(0.7,0.7)
+              - type: state-badge
+                title: ""
+                entity: sensor.trv_kitchen_temperature
+                tap_action:
+                  action: navigate
+                  navigation_path: /home-mobile-view/heating
+                style:
+                  color: transparent
+                  top: 66%
+                  left: 25%
+                  font-size: 17px
+                  transform: translate(-50%,-50%) scale(0.7,0.7)
+              - type: state-icon
+                entity: light.dmmerswitchlivingroom
+                title: Living room light
+                tap_action:
+                  action: toggle
+                hold_action:
+                  action: more-info
+                style:
+                  top: 65%
+                  left: 73%
+                  "--iron-icon-height": 42px
+                  "--iron-icon-width": 42px
+              - type: state-icon
+                entity: light.light_livingroom
+                title: Living room light
+                tap_action:
+                  action: toggle
+                hold_action:
+                  action: more-info
+                style:
+                  top: 80%
+                  left: 73%
+                  "--iron-icon-height": 42px
+                  "--iron-icon-width": 42px
+              - type: state-badge
+                title: ""
+                entity: sensor.tasmotatempsensorlivingroom_bme280_temperature
+                tap_action:
+                  action: navigate
+                  navigation_path: /home-mobile-view/heating
+                style:
+                  color: transparent
+                  top: 48%
+                  left: 73%
+                  font-size: 17px
+                  transform: translate(-50%,-50%) scale(0.7,0.7)
+              - type: state-icon
+                entity: switch.light_switch_kitchen
+                icon: mdi:ceiling-light
+                title: Kitchen Light
+                tap_action:
+                  action: toggle
+                hold_action:
+                  action: more-info
+                style:
+                  top: 65%
+                  left: 38%
+                  "--iron-icon-height": 42px
+                  "--iron-icon-width": 42px
+              - type: state-icon
+                entity: switch.light_switch_dual_hall_stairs_left
+                icon: mdi:ceiling-light
+                title: Hall Light
+                tap_action:
+                  action: toggle
+                hold_action:
+                  action: more-info
+                style:
+                  top: 81%
+                  left: 15%
+                  "--iron-icon-height": 42px
+                  "--iron-icon-width": 42px
+              - type: state-icon
+                entity: light.light_stairs
+                title: Light Stairs
+                icon: mdi:ceiling-light
+                tap_action:
+                  action: toggle
+                hold_action:
+                  action: more-info
+                style:
+                  top: 90%
+                  left: 40%
+                  "--iron-icon-height": 42px
+                  "--iron-icon-width": 42px
+              - type: icon
+                title: Living room camera
+                icon: mdi:cctv
+                entity: camera.tapocamera_sd
+                tap_action:
+                  action: navigate
+                  navigation_path: /home-mobile-view/cameras
+                style:
+                  top: 98%
+                  left: 18%
+                  "--iron-icon-fill-color": "#11AB7D"
+                  "--iron-icon-height": 40px
+                  "--iron-icon-width": 40px
+          - type: picture-elements
+            image: local/floorplan/hendravean/first_floor.png
+            elements:
+              - type: state-icon
+                entity: light.light_masterbedroom
+                title: Master Bedroom Light
+                tap_action:
+                  action: toggle
+                hold_action:
+                  action: more-info
+                style:
+                  top: 25%
+                  left: 33%
+                  "--iron-icon-height": 42px
+                  "--iron-icon-width": 42px
+              - type: state-badge
+                title: ""
+                entity: sensor.trv_master_bedroom_temperature
+                tap_action:
+                  action: navigate
+                  navigation_path: /home-mobile-view/heating
+                style:
+                  color: transparent
+                  top: 35%
+                  left: 18%
+                  font-size: 17px
+                  transform: translate(-50%,-50%) scale(0.7,0.7)
+              - type: state-badge
+                title: ""
+                entity: sensor.trv_bathroom_temperature
+                tap_action:
+                  action: navigate
+                  navigation_path: /home-mobile-view/heating
+                style:
+                  color: transparent
+                  top: 76%
+                  left: 20%
+                  font-size: 17px
+                  transform: translate(-50%,-50%) scale(0.7,0.7)
+              - type: state-badge
+                title: ""
+                entity: sensor.trv_bedroom_front_temperature
+                tap_action:
+                  action: navigate
+                  navigation_path: /home-mobile-view/heating
+                style:
+                  color: transparent
+                  top: 88%
+                  left: 75%
+                  font-size: 17px
+                  transform: translate(-50%,-50%) scale(0.7,0.7)
+              - type: state-badge
+                title: ""
+                entity: sensor.trv_bedroom_rear_temperature
+                tap_action:
+                  action: navigate
+                  navigation_path: /home-mobile-view/heating
+                style:
+                  color: transparent
+                  top: 24%
+                  left: 75%
+                  font-size: 17px
+                  transform: translate(-50%,-50%) scale(0.7,0.7)
+              - type: state-icon
+                entity: light.light_amelie_bedroom
+                title: Bedroom Rear Light
+                tap_action:
+                  action: toggle
+                hold_action:
+                  action: more-info
+                style:
+                  top: 28%
+                  left: 75%
+                  "--iron-icon-height": 42px
+                  "--iron-icon-width": 42px
+              - type: state-icon
+                entity: light.light_stairs
+                title: Light Stairs
+                icon: mdi:ceiling-light
+                tap_action:
+                  action: toggle
+                hold_action:
+                  action: more-info
+                style:
+                  top: 76%
+                  left: 40%
+                  "--iron-icon-height": 42px
+                  "--iron-icon-width": 42px
+              - type: icon
+                title: Driveway camera
+                icon: mdi:cctv
+                entity: camera.driveway_camera
+                style:
+                  top: 100%
+                  left: 90%
+                  "--iron-icon-fill-color": "#11AB7D"
+                  "--iron-icon-height": 40px
+                  "--iron-icon-width": 40px
+  - title: Heating
+    badges: []
+    cards:
+      - type: history-graph
+        entities:
+          - entity: switch.boilercontroller_tasmota
+            name: Boiler
+          - entity: binary_sensor.trv_livingroom_heating_sonoff
+            name: Livingroom
+          - entity: binary_sensor.trv_masterbedroom_heating_sonoff
+            name: MasterBedroom
+          - entity: sensor.tasmotatempsensorlivingroom_bme280_temperature
+            name: Livingroom
+          - entity: sensor.tasmotatempsensorlivingroom_bme280_humidity
+            name: Livingroom
+          - entity: sensor.tasmotatempsensoroutside_bme280_humidity
+            name: Outside
+          - entity: sensor.tasmotatempsensoroutside_bme280_temperature
+            name: Outside
+          - entity: sensor.tasmotatempsensorbedroom_bme280_temperature
+            name: Master bedroom
+          - entity: sensor.tasmotatempsensorbedroom_bme280_humidity
+            name: Master bedroom
+          - entity: binary_sensor.trv_bedroom_rear_heating_sonoff
+            name: Amelie bedroom
+          - entity: binary_sensor.trv_bedroom_front_heating_sonoff
+            name: Bedroom Front
+          - entity: sensor.temperature_sensor_amelie_bedroom_temperature
+            name: Amelie bedroom
+          - entity: sensor.temperature_sensor_amelie_bedroom_humidity
+            name: Ameile bedroom
+          - entity: switch.piv_fan
+          - entity: sensor.temp_sensor_livingroom_zigbee_temperature
+          - entity: sensor.temp_sensor_masterbedroom_zigbee_temperature
+          - entity: sensor.temp_sensor_masterbedroom_zigbee_humidity
+        hours_to_show: 24
+        refresh_interval: 1
+        title: "Bedroom "
+      - type: entities
+        entities:
+          - entity: switch.diesel_heater
+            icon: mdi:fire
+          - entity: sensor.diesel_heater_state
+            icon: mdi:state-machine
+          - entity: sensor.diesel_heater_vent
+            icon: mdi:fan
+          - entity: number.diesel_heater_intensity
+        title: Diesel Heater
+      - type: thermostat
+        entity: climate.trv_livingroom_sonoff
+        name: Living room temperature
+      - type: thermostat
+        entity: climate.trv_masterbedroom_sonoff
+        name: Master Bedroom Temperature
+      - type: thermostat
+        entity: climate.trv_bedroom_rear_sonoff
+        name: "Amelie bedroom "
+      - type: thermostat
+        entity: climate.trv_conservatory_sonoff
+        name: Conservatory Radiator
+      - type: thermostat
+        entity: climate.trv_bedroom_front_sonoff
+        name: Bedroom Front Radiator
+      - type: thermostat
+        entity: climate.trv_bathroom_sonoff
+        name: Bathroom Radiator
+      - type: thermostat
+        entity: climate.trv_kitchen_sonoff
+        name: Kitchen Radiator
+      - type: custom:scheduler-card
+        include:
+          - climate
+      - type: entities
+        entities:
+          - entity: switch.boilercontroller_tasmota
+            icon: mdi:water-boiler
+            name: Boiler State
+          - entity: binary_sensor.trv_livingroom_heating_sonoff
+          - entity: binary_sensor.trv_masterbedroom_heating_sonoff
+          - entity: binary_sensor.trv_conservatory_heating
+          - entity: binary_sensor.trv_bathroom_heating
+          - entity: binary_sensor.trv_bedroom_front_heating_sonoff
+          - entity: binary_sensor.trv_bedroom_rear_heating_sonoff
+      - type: weather-forecast
+        entity: weather.caravan
+        show_forecast: false
+      - show_name: true
+        show_icon: true
+        type: button
+        entity: switch.piv_fan
+        icon: mdi:fan
+      - type: grid
+        square: false
+        columns: 1
+        cards:
+          - type: thermostat
+            entity: climate.aircon_master_bedroom
+            features:
+              - type: climate-hvac-modes
+                hvac_modes:
+                  - "off"
+                  - cool
+                  - heat
+                  - dry
+                  - fan_only
+                  - heat_cool
+          - type: thermostat
+            entity: climate.aircon_amelie_bedroom
+            features:
+              - type: climate-hvac-modes
+                hvac_modes:
+                  - "off"
+                  - cool
+                  - heat
+                  - dry
+                  - fan_only
+                  - heat_cool
+          - type: thermostat
+            entity: climate.aircon_bedroom_front
+            features:
+              - type: climate-hvac-modes
+                hvac_modes:
+                  - "off"
+                  - cool
+                  - heat
+                  - dry
+                  - fan_only
+                  - heat_cool
+  - title: Lights
+    path: lights
+    icon: ""
+    badges: []
+    cards:
+      - type: light
+        entity: light.light_livingroom
+        double_tap_action:
+          action: more-info
+      - type: light
+        entity: light.dmmerswitchlivingroom
+        double_tap_action:
+          action: more-info
+        icon: mdi:ceiling-light
+      - type: light
+        entity: light.light_masterbedroom
+        double_tap_action:
+          action: more-info
+      - type: light
+        entity: light.light_stairs
+        double_tap_action:
+          action: more-info
+      - type: button
+        tap_action:
+          action: toggle
+        entity: switch.light_switch_dual_hall_stairs_left
+        icon: mdi:ceiling-light
+        name: Light Hall
+      - type: button
+        tap_action:
+          action: toggle
+        entity: switch.light_switch_kitchen
+        icon: mdi:ceiling-light
+        name: Light Kitchen
+      - type: button
+        tap_action:
+          action: toggle
+        entity: switch.light_switch_dual_hall_stairs_right
+        icon: mdi:ceiling-light
+        name: Light Switch Stairs
+      - type: light
+        entity: light.light_amelie_bedroom
+        double_tap_action:
+          action: more-info
+  - theme: Backend-selected
+    title: Energy
+    path: energy
+    badges: []
+    cards:
+      - square: false
+        type: grid
+        cards:
+          - type: entity
+            entity: sensor.sofar_ess_grid_power
+            name: Grid
+          - type: entity
+            entity: sensor.opendtu_60d84c_ac_power
+            name: Solar
+          - type: entity
+            entity: sensor.load_power
+            name: Load
+          - type: entity
+            entity: sensor.sofar_ess_battery_power
+            name: Battery
+          - type: entity
+            entity: sensor.sofar_ess_battery_soc
+            name: SOC
+          - type: entity
+            entity: sensor.sofar_ess_ess_command
+            name: Command
+          - type: entity
+            entity: sensor.sofar_ess_sofar_mode
+            name: Mode
+          - type: entity
+            entity: sensor.smart_charge_status
+            name: Smart charge
+        columns: 2
+      - type: history-graph
+        title: Power (1 h)
+        hours_to_show: 1
+        entities:
+          - entity: sensor.opendtu_60d84c_ac_power
+            name: Solar
+          - entity: sensor.sofar_ess_grid_power
+            name: Grid
+          - entity: sensor.load_power
+            name: Load
+          - entity: sensor.sofar_ess_battery_power
+            name: Battery
+      - type: sensor
+        entity: sensor.sofar_ess_battery_soc
+        graph: line
+        detail: 1
+        hours_to_show: 24
+        name: Battery SOC (24 h)
+      - type: entities
+        title: Inverter
+        show_header_toggle: false
+        entities:
+          - entity: switch.sofar_ess_ess_enabled
+            name: ESS enabled
+          - entity: switch.sofar_ess_ess_charge_only
+            name: Charge only (excess)
+          - type: divider
+          - entity: switch.sofar_ess_ess_soc_protect
+            name: SOC protect
+          - entity: binary_sensor.sofar_ess_ess_soc_protect_active
+            name: SOC protect active
+          - entity: number.sofar_ess_soc_protect_low
+            name: SOC protect low (%)
+          - entity: number.sofar_ess_soc_protect_hyst
+            name: SOC protect hysteresis (%)
+          - type: divider
+          - entity: number.sofar_ess_ess_kp
+            name: Kp
+          - entity: number.sofar_ess_ess_ki
+            name: Ki
+          - entity: number.sofar_ess_ess_deadband
+            name: Deadband (W)
+          - entity: number.sofar_ess_ess_min_delta
+            name: Min delta (W)
+          - type: divider
+          - entity: button.sofar_ess_standby
+            name: Standby
+          - entity: button.sofar_ess_auto
+            name: Auto
+          - entity: button.sofar_ess_reset_integral
+            name: Reset integral
+      - type: entities
+        title: Smart overnight charge (00:30–05:30 @ 9.5p)
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.smart_charge_enabled
+            name: Automation enabled
+          - entity: sensor.smart_charge_status
+            name: Status
+          - entity: sensor.smart_charge_decision_reason
+            name: Decision
+          - entity: sensor.smart_charge_target_soc
+            name: Target SOC (live calc)
+          - entity: input_number.smart_charge_locked_target_soc
+            name: Locked overnight target
+          - type: divider
+          - entity: sensor.energy_production_tomorrow
+            name: Forecast tomorrow
+          - entity: sensor.energy_production_today
+            name: Forecast today
+          - entity: sensor.smart_charge_corrected_forecast
+            name: Corrected tomorrow
+          - entity: input_number.smart_charge_learned_demand_kwh
+            name: Learned daily demand
+          - entity: input_number.smart_charge_forecast_correction
+            name: Forecast correction
+          - type: divider
+          - entity: input_number.smart_charge_min_soc
+            name: Min SOC
+          - entity: input_number.smart_charge_max_soc
+            name: Max overnight SOC
+          - entity: input_number.smart_charge_battery_kwh
+            name: Battery capacity
+          - entity: input_number.smart_charge_power_w
+            name: Charge power
+          - entity: number.sofar_ess_charge_target_soc
+            name: Charge target SOC (firmware)
+          - type: divider
+          - entity: script.smart_charge_evaluate_now
+            name: Recalculate / apply now
+          - entity: script.smart_charge_stop_and_restore_ess
+            name: Stop & restore full ESS
+      - type: entities
+        title: Today
+        show_header_toggle: false
+        entities:
+          - entity: sensor.opendtu_60d84c_yield_day
+            name: Solar yield
+          - entity: sensor.grid_energy_imported_daily
+            name: Grid import
+          - entity: sensor.grid_energy_exported_daily
+            name: Grid export
+          - entity: sensor.smart_charge_load_energy_daily
+            name: House load (est.)
+          - entity: sensor.hms_1600_4t_temperature
+            name: Inverter temp
+          - entity: sensor.opendtu_60d84c_yield_total
+            name: Solar lifetime
+      - type: history-graph
+        title: Power (24 h)
+        hours_to_show: 24
+        entities:
+          - entity: sensor.opendtu_60d84c_ac_power
+            name: Solar
+          - entity: sensor.sofar_ess_grid_power
+            name: Grid
+          - entity: sensor.load_power
+            name: Load
+      - type: statistics-graph
+        title: Hourly averages (24 h)
+        days_to_show: 1
+        period: hour
+        chart_type: line
+        stat_types:
+          - mean
+        entities:
+          - entity: sensor.opendtu_60d84c_ac_power
+            name: Solar
+          - entity: sensor.sofar_ess_grid_power
+            name: Grid
+          - entity: sensor.load_power
+            name: Load
+  - title: Cameras
+    path: cameras
+    cards:
+      - type: picture-entity
+        entity: camera.tapocamera_sd
+      - type: picture-entity
+        entity: camera.tapo_camera_garden_sd_stream
+      - show_state: true
+        show_name: true
+        camera_view: auto
+        type: picture-entity
+        entity: camera.tapo_amelie_sd_stream
+        camera_image: camera.tapo_amelie_sd_stream
+      - show_state: true
+        show_name: true
+        camera_view: auto
+        type: picture-entity
+        entity: camera.livingroom_camera
+  - theme: Backend-selected
+    title: Temperature
+    path: Temperature
+    icon: ""
+    badges: []
+    cards:
+      - type: entities
+        entities:
+          - entity: sensor.tasmotatempsensoroutside_bme280_temperature
+            name: Temperature Outside
+          - entity: sensor.tasmotatempsensorlivingroom_bme280_temperature
+            name: Livingroom
+          - entity: sensor.tasmotatempsensorbedroom_bme280_temperature
+            name: Bedroom
+          - entity: sensor.temperature_sensor_amelie_bedroom_temperature
+          - entity: sensor.tasmotatempsensoroutside_bme280_humidity
+            name: Outside
+          - entity: sensor.tasmotatempsensorlivingroom_bme280_humidity
+            name: Livingroom
+          - entity: sensor.tasmotatempsensorbedroom_bme280_humidity
+            name: Bedroom
+          - entity: sensor.temperature_sensor_amelie_bedroom_humidity
+      - type: history-graph
+        entities:
+          - entity: switch.boiler_controller
+          - entity: sensor.tasmota_bme280_temperature
+          - entity: sensor.tasmota_bme280_humidity
+          - entity: sensor.tasmotatempsensorlivingroom_bme280_temperature
+          - entity: sensor.tasmotatempsensorlivingroom_bme280_humidity
+          - entity: sensor.tasmotatempsensorbedroom_bme280_temperature
+          - entity: sensor.tasmotatempsensorbedroom_bme280_humidity
+          - entity: sensor.tasmotatempsensoroutside_bme280_temperature
+          - entity: sensor.tasmotatempsensoroutside_bme280_humidity
+        hours_to_show: 24
+        refresh_interval: 1
+        title: Temperature
+  - type: masonry
+    path: misc
+    title: Miscellaneous
+    cards:
+      - type: entities
+        entities:
+          - switch.windowamelie
+          - switch.windowamelie_2
+        title: Window Amelie
+        show_header_toggle: false
+      - type: grid
+        square: false
+        columns: 1
+        cards:
+          - type: humidifier
+            entity: humidifier.arete_r_two_25l_dehumidifier_air_purifier_2
+            features:
+              - type: humidifier-toggle
+      - type: entities
+        entities:
+          - entity: sensor.aqs_sen6x_c3_co2
+          - entity: sensor.aqs_sen6x_c3_nox_index
+          - entity: sensor.aqs_sen6x_c3_pm_1_0
+          - entity: sensor.aqs_sen6x_c3_pm_2_5
+          - entity: sensor.aqs_sen6x_c3_pm_4_0
+          - entity: sensor.aqs_sen6x_c3_pm_10
+          - entity: sensor.aqs_sen6x_c3_voc_index
+          - entity: sensor.aqs_sen6x_c3_humidity
+          - entity: sensor.aqs_sen6x_c3_temperature
+      - type: history-graph
+        entities:
+          - entity: switch.boilercontroller_tasmota
+          - entity: sensor.aqs_sen6x_c3_voc_index
+          - entity: sensor.aqs_sen6x_c3_co2
+          - entity: sensor.aqs_sen6x_c3_humidity
+          - entity: sensor.aqs_sen6x_c3_temperature
+          - entity: sensor.powermonitor_energy_power
+        title: "Air quality "
+    badges: []
+  - title: Motion Sensor
+    path: motion-sensor
+    badges: []
+    cards:
+      - type: entities
+        entities:
+          - entity: binary_sensor.motion_sensor_kitchen_occupancy
+          - entity: binary_sensor.motion_sensor_stairs_occupancy
+        title: Motion sensors
+      - type: button
+        tap_action:
+          action: toggle
+        entity: input_boolean.alarm_mode
+        name: Alarm mode
+      - type: entities
+        entities:
+          - binary_sensor.gas_sensor_gas
