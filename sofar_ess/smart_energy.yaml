@@ -1,4 +1,4 @@
- # Sofar ESS — smart overnight charging (Home Assistant package)
+# Sofar ESS — smart overnight charging (Home Assistant package)
 #
 # Install:
 #   1. In configuration.yaml enable packages, e.g.:
@@ -64,7 +64,7 @@ input_number:
     initial: 2500
     mode: box
   smart_charge_learned_demand_kwh:
-    name: Smart charge learned daily demand
+    name: Smart charge daily demand
     min: 1
     max: 80
     step: 0.1
@@ -110,23 +110,6 @@ input_text:
     max: 255
     initial: "Waiting for first evaluation"
     icon: mdi:text
-
-# Load energy from power (Wh → kWh via unit_prefix)
-sensor:
-  - platform: integration
-    source: sensor.load_power
-    name: Smart Charge Load Energy
-    unique_id: smart_charge_load_energy
-    unit_prefix: k
-    round: 3
-    method: left
-
-utility_meter:
-  smart_charge_load_energy_daily:
-    unique_id: smart_charge_load_energy_daily
-    source: sensor.smart_charge_load_energy
-    name: Smart Charge Load Energy Daily
-    cycle: daily
 
 template:
   - sensor:
@@ -358,12 +341,21 @@ script:
                             data:
                               status: charging
                               reason: "{{ reason }} | SOC {{ soc | round(0) }}% < {{ target }}% — charging"
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ soc | float > target | float }}"
+                        sequence:
+                          - service: script.smart_charge_restore_full_ess
+                          - service: script.smart_charge_set_status
+                            data:
+                              status: discharging
+                              reason: "{{ reason }} | SOC {{ soc | round(0) }}% > {{ target }}% — ESS down to target"
                     default:
                       - service: script.smart_charge_command_standby
                       - service: script.smart_charge_set_status
                         data:
                           status: holding
-                          reason: "{{ reason }} | SOC {{ soc | round(0) }}% ≥ {{ target }}% — standby"
+                          reason: "{{ reason }} | SOC {{ soc | round(0) }}% == {{ target }}% — standby"
             default:
               - service: script.smart_charge_restore_full_ess
               - service: script.smart_charge_set_status
@@ -394,13 +386,16 @@ automation:
       - service: script.smart_charge_evaluate_now
 
   - id: smart_charge_reach_target
-    alias: Smart charge stop at target SOC
-    description: During cheap window, update status when target SOC is reached (firmware also stops charge).
+    alias: Smart charge target SOC reached
+    description: During cheap window, re-evaluate when we hit the target from above or below, or if inverter goes to standby.
     mode: single
     trigger:
       - platform: numeric_state
         entity_id: sensor.sofar_ess_battery_soc
         above: input_number.smart_charge_locked_target_soc
+      - platform: template
+        value_template: >-
+          {{ states('sensor.sofar_ess_battery_soc') | float(100) <= states('input_number.smart_charge_locked_target_soc') | float(-1) }}
       - platform: state
         entity_id: sensor.sofar_ess_sofar_mode
         to: standby
@@ -408,19 +403,12 @@ automation:
       - condition: state
         entity_id: input_boolean.smart_charge_enabled
         state: "on"
-      - condition: state
-        entity_id: input_boolean.smart_charge_session_active
-        state: "on"
       - condition: time
         after: "00:30:00"
         before: "05:30:00"
     action:
-      - service: script.smart_charge_command_standby
-      - service: script.smart_charge_set_status
-        data:
-          status: holding
-          reason: >-
-            Reached target {{ states('input_number.smart_charge_locked_target_soc') }}% — standby until 05:30
+      - delay: "00:00:05"
+      - service: script.smart_charge_evaluate_now
 
   - id: smart_charge_enable_in_window
     alias: Smart charge enable during cheap window
@@ -521,26 +509,6 @@ automation:
         data:
           status: error
           reason: "SOC became unavailable — forced standby"
-
-  - id: smart_charge_learn_demand
-    alias: Smart charge learn daily demand
-    description: Smooth learned household demand from estimated daily load energy.
-    mode: single
-    trigger:
-      - platform: time
-        at: "23:50:00"
-    action:
-      - variables:
-          today: "{{ states('sensor.smart_charge_load_energy_daily') | float(0) }}"
-          old: "{{ states('input_number.smart_charge_learned_demand_kwh') | float(12) }}"
-          blended: "{{ (0.7 * old + 0.3 * today) | round(2) }}"
-      - condition: template
-        value_template: "{{ today > 0.5 }}"
-      - service: input_number.set_value
-        target:
-          entity_id: input_number.smart_charge_learned_demand_kwh
-        data:
-          value: "{{ blended }}"
 
   - id: smart_charge_learn_forecast_bias
     alias: Smart charge learn forecast bias
