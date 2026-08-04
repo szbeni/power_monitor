@@ -65,7 +65,7 @@
 #endif
 #else
 #ifndef MAX_POWER_W
-#define MAX_POWER_W 2500
+#define MAX_POWER_W 3600
 #endif
 #endif
 

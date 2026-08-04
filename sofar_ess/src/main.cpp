@@ -222,6 +222,11 @@ static const HaSensor kHaSensors[] = {
     {"energy_export", "Energy Export", "{{ value_json.energy_export_wh }}", "Wh", "energy", "total_increasing"},
     {"sofar_mode", "Sofar Mode", "{{ value_json.sofar_mode }}", nullptr, nullptr, nullptr},
     {"run_state", "Run State", "{{ value_json.run_state }}", nullptr, nullptr, nullptr},
+    {"run_state_name", "Run State Name", "{{ value_json.run_state_name }}", nullptr, nullptr, nullptr},
+    {"fault_message", "Sofar Fault", "{{ value_json.fault_message }}", nullptr, nullptr, nullptr},
+    {"alert_message", "Sofar Alert", "{{ value_json.alert_message }}", nullptr, nullptr, nullptr},
+    {"batt_fault_message", "Battery Fault", "{{ value_json.batt_fault_message }}", nullptr, nullptr, nullptr},
+    {"sofar_last_error", "Sofar Last Error", "{{ value_json.sofar_last_error }}", nullptr, nullptr, nullptr},
 };
 
 static void haFillDevice(JsonObject device) {
@@ -284,6 +289,50 @@ static void publishHaDiscovery() {
     String payload;
     serializeJson(doc, payload);
     haPublishConfig("sensor", sensor.objectId, payload);
+  }
+
+  // Sofar RS485 health (true = at least one register read succeeded)
+  {
+    JsonDocument doc;
+    doc["name"] = "Sofar OK";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_sofar_ok", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = stateTopic;
+    doc["value_template"] = "{{ value_json.sofar_ok }}";
+    doc["payload_on"] = "true";
+    doc["payload_off"] = "false";
+    doc["device_class"] = "connectivity";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("binary_sensor", "sofar_ok", payload);
+  }
+
+  // Inverter in fault / permanent fault run-state
+  {
+    JsonDocument doc;
+    doc["name"] = "Sofar Fault Active";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_sofar_fault_active", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = stateTopic;
+    doc["value_template"] = "{{ value_json.fault_active }}";
+    doc["payload_on"] = "true";
+    doc["payload_off"] = "false";
+    doc["device_class"] = "problem";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("binary_sensor", "sofar_fault_active", payload);
   }
 
   // ESS enable switch (state from dedicated topic — string true/false)
@@ -895,6 +944,33 @@ static void publishState() {
   json += modeName(sofarLastMode());
   json += "\",\"charge_target_soc\":";
   json += String(chargeTargetSoc);
+  json += ",\"sofar_ok\":";
+  json += lastSofarOk ? "true" : "false";
+  json += ",\"sofar_last_error\":\"";
+  json += lastSofar.lastError;
+  json += "\"";
+
+  char faultMsg[160] = "";
+  char alertMsg[96] = "";
+  char battFaultMsg[96] = "";
+  sofarFormatFaults(lastSofar, faultMsg, sizeof(faultMsg));
+  sofarFormatAlerts(lastSofar, alertMsg, sizeof(alertMsg));
+  sofarFormatBattFaults(lastSofar, battFaultMsg, sizeof(battFaultMsg));
+
+  const bool faultActive =
+      lastSofarOk && (lastSofar.runState == 6 || lastSofar.runState == 7 || faultMsg[0] != '\0');
+  json += ",\"fault_active\":";
+  json += faultActive ? "true" : "false";
+  json += ",\"run_state_name\":\"";
+  json += sofarRunStateName(lastSofar.runState);
+  json += "\",\"fault_message\":\"";
+  json += faultMsg;
+  json += "\",\"alert_message\":\"";
+  json += alertMsg;
+  json += "\",\"batt_fault_message\":\"";
+  json += battFaultMsg;
+  json += "\"";
+
   if (lastSofarOk) {
     json += ",\"run_state\":";
     json += String(lastSofar.runState);
@@ -904,8 +980,38 @@ static void publishState() {
     json += String(lastSofar.batteryPowerW);
     json += ",\"sofar_grid_raw\":";
     json += String(lastSofar.gridPowerRaw);
-  } else {
-    json += ",\"sofar_ok\":false";
+  }
+  if (lastSofar.faultValid) {
+    char hex[48];
+    snprintf(hex,
+             sizeof(hex),
+             "%04X,%04X,%04X,%04X,%04X",
+             lastSofar.fault[0],
+             lastSofar.fault[1],
+             lastSofar.fault[2],
+             lastSofar.fault[3],
+             lastSofar.fault[4]);
+    json += ",\"fault_raw\":\"";
+    json += hex;
+    json += "\"";
+  }
+  if (lastSofar.alertValid) {
+    json += ",\"alert_raw\":";
+    json += String(lastSofar.alert);
+  }
+  if (lastSofar.battFaultValid) {
+    char hex[48];
+    snprintf(hex,
+             sizeof(hex),
+             "%04X,%04X,%04X,%04X,%04X",
+             lastSofar.battFault[0],
+             lastSofar.battFault[1],
+             lastSofar.battFault[2],
+             lastSofar.battFault[3],
+             lastSofar.battFault[4]);
+    json += ",\"batt_fault_raw\":\"";
+    json += hex;
+    json += "\"";
   }
   json += "}";
 

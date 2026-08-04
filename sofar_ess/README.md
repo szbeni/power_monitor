@@ -8,7 +8,7 @@ Every ~500 ms:
 
 1. Sample **load2 active power** from MycilaJSY
 2. If ESS enabled, run a **PI** on grid residual `e = P` (`u = Kp·e + Ki·∫e`), then charge/discharge/standby from `u`
-3. Publish live ESS MQTT topics; `…/state` (~10 s) is **cache-only**. Sofar registers are refreshed one-per-ESS-cycle (run / grid / batt / SOC).
+3. Publish live ESS MQTT topics; `…/state` (~5 s) is **cache-only**. Sofar registers are refreshed one Modbus txn per ESS cycle (run / grid / batt / SOC / fault block / alert / battery-fault).
 
 Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator freezes in the deadband, uses measured `dt`, and has anti-windup at ±MAX.
 
@@ -154,11 +154,20 @@ mosquitto_pub -t sofaress/set/min_delta -m 10
 | `ess_integral` | Integrator state |
 | `sofar_mode` | `standby` / `charge` / `discharge` / `auto` / `unknown` |
 | `charge_target_soc` | Manual charge stop target % (0 = no limit) |
-| `run_state` | Sofar run-state register (when RS485 OK) |
+| `sofar_ok` | `true` once any Sofar Modbus read succeeds; `false` = RS485 never OK |
+| `sofar_last_error` | Last Modbus fail reason (`no-rx`, `timeout`, `crc`, `exception`, …) |
+| `run_state` | Sofar run-state register (0–7) when RS485 OK |
+| `run_state_name` | `wait` / `check` / `normal` / `discharge` / `fault` / `permanent_fault` / … |
+| `fault_active` | `true` if run-state is fault/permanent or any named fault bit set |
+| `fault_message` | Decoded inverter fault bits (regs `0x0201`–`0x0205`) |
+| `fault_raw` | Five fault words as hex (`HHHH,HHHH,…`) |
+| `alert_message` | Decoded inverter alerts (reg `0x022B`) |
+| `alert_raw` | Raw alert register |
+| `batt_fault_message` | Decoded battery fault bits (regs `0x023D`–`0x0241`) |
+| `batt_fault_raw` | Five battery-fault words as hex |
 | `battery_soc` | Battery state of charge % |
 | `battery_power_w` | Measured battery power (W) |
 | `sofar_grid_raw` | Raw Sofar grid-power register |
-| `sofar_ok` | Present as `false` if Sofar data never read successfully |
 
 Manual `/set/charge|discharge|standby|auto` turns ESS off so you can take over; publish `…/set/ess` `true` to resume the loop (or `charge_only` to resume soak-only).
 
@@ -173,13 +182,13 @@ mosquitto_pub -t sofaress/set/charge_only -m true
 
 With MQTT discovery enabled (`HA_MQTT_DISCOVERY=1`, default), device **Sofar ESS** appears when MQTT connects.
 
-- Sensors: grid / battery power, ESS command, SOC, energy import/export, Sofar mode, run state  
+- Sensors: grid / battery power, ESS command, SOC, energy import/export, Sofar mode, run state / name, fault / alert / battery-fault messages, Sofar last error  
+- Binary sensors: Sofar OK (RS485), Sofar fault active, ESS SOC protect active  
 - Switch: ESS enabled, ESS charge only, ESS SOC protect  
-- Binary sensor: ESS SOC protect active  
 - Numbers: ESS Kp, ESS Ki, Deadband, Min Delta, SOC protect low, SOC protect hysteresis  
 - Buttons: Standby, Auto, Reset Integral  
 
-See the MQTT section above for what each mode/topic means. Requires the HA MQTT integration (discovery prefix `homeassistant`). Re-flash / reconnect MQTT to refresh discovery.
+If **Sofar OK** stays off, check `sofar_last_error` (`no-rx` = wiring/DE/slave ID; `crc` = noise/baud; `exception` = bad register). Inverter **fault** run-state is separate — use **Sofar Fault** / **fault_raw** from the PDF fault-message registers.
 
 ### Dashboard + smart overnight charging
 
@@ -210,11 +219,13 @@ Setup:
 
 Behaviour (when automation is on):
 
-- **00:30** — lock overnight target SOC from corrected forecast vs learned demand; charge if SOC is below target (firmware stops at target SOC), otherwise standby  
-- **Reach target** — stop charging (standby) until the window ends — enforced in firmware via `set/charge_target_soc` and mirrored in HA  
+- **00:30** — lock overnight target SOC; pick charge / standby / ESS from SOC vs target  
+- **SOC < target** — force charge  
+- **target … target+2%** — standby (grid only; no battery charge/discharge)  
+- **SOC > target+2%** — full ESS  
 - **05:30** — restore full ESS for the rest of the day  
 - **Outside cheap window** — full bidirectional ESS whenever automation is enabled  
-- **Enable mid-window** — re-evaluate and charge or hold  
+- **Enable mid-window** — re-evaluate and charge / hold / ESS  
 - **HA restart** inside the window — re-evaluate after 30 s  
 - **HA restart** outside the window — restore full ESS after 30 s  
 - **SOC unavailable** — force standby  

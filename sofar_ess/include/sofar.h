@@ -22,6 +22,19 @@ struct SofarStatus {
   uint16_t batterySoc = 0;
   bool socValid = false;
   bool ok = false;
+
+  // Inverter fault message list (0x0201–0x0205): word N = byte(2N+1)<<8 | byte(2N).
+  uint16_t fault[5] = {};
+  bool faultValid = false;
+  // Inverter alert (0x022B), low byte = alert byte0.
+  uint16_t alert = 0;
+  bool alertValid = false;
+  // Battery fault message list (0x023D–0x0241).
+  uint16_t battFault[5] = {};
+  bool battFaultValid = false;
+
+  // Last Modbus failure reason (timeout, crc, exception, …).
+  char lastError[24] = "";
 };
 
 bool sofarBegin(HardwareSerial& bus);
@@ -34,3 +47,9 @@ bool sofarDischarge(uint16_t watts);
 bool sofarPollStatusField(SofarStatus& cache);
 SofarMode sofarLastMode();
 uint16_t sofarLastSetpointW();
+
+const char* sofarRunStateName(uint16_t runState);
+// Append active fault/alert bit names into out (comma-separated). Returns out.
+size_t sofarFormatFaults(const SofarStatus& s, char* out, size_t outLen);
+size_t sofarFormatAlerts(const SofarStatus& s, char* out, size_t outLen);
+size_t sofarFormatBattFaults(const SofarStatus& s, char* out, size_t outLen);

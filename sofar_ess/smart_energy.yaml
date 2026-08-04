@@ -218,6 +218,7 @@ script:
     alias: Smart charge command charge
     mode: single
     sequence:
+      # Stop at locked target — band [target, target+hyst] is standby (grid only).
       - service: mqtt.publish
         data:
           topic: sofaress/set/charge_target_soc
@@ -331,10 +332,25 @@ script:
                         after: "00:30:00"
                         before: "05:30:00"
                 sequence:
+                  #   SOC < target              → force charge
+                  #   target … target+hyst      → standby (grid only)
+                  #   SOC > target + hyst       → full ESS
+                  - variables:
+                      hyst: 2
+                      band: >-
+                        {% set t = target | float %}
+                        {% set s = soc | float %}
+                        {% if s < t %}
+                          charge
+                        {% elif s > (t + hyst) %}
+                          ess
+                        {% else %}
+                          standby
+                        {% endif %}
                   - choose:
                       - conditions:
                           - condition: template
-                            value_template: "{{ soc | float < target | float }}"
+                            value_template: "{{ band == 'charge' }}"
                         sequence:
                           - service: script.smart_charge_command_charge
                           - service: script.smart_charge_set_status
@@ -343,19 +359,19 @@ script:
                               reason: "{{ reason }} | SOC {{ soc | round(0) }}% < {{ target }}% — charging"
                       - conditions:
                           - condition: template
-                            value_template: "{{ soc | float > target | float }}"
+                            value_template: "{{ band == 'ess' }}"
                         sequence:
                           - service: script.smart_charge_restore_full_ess
                           - service: script.smart_charge_set_status
                             data:
-                              status: discharging
-                              reason: "{{ reason }} | SOC {{ soc | round(0) }}% > {{ target }}% — ESS down to target"
+                              status: ess
+                              reason: "{{ reason }} | SOC {{ soc | round(0) }}% > {{ (target | float + hyst) | int }}% — ESS"
                     default:
                       - service: script.smart_charge_command_standby
                       - service: script.smart_charge_set_status
                         data:
                           status: holding
-                          reason: "{{ reason }} | SOC {{ soc | round(0) }}% == {{ target }}% — standby"
+                          reason: "{{ reason }} | SOC {{ soc | round(0) }}% in [{{ target }}%, {{ (target | float + hyst) | int }}%] — standby (grid)"
             default:
               - service: script.smart_charge_restore_full_ess
               - service: script.smart_charge_set_status
@@ -385,20 +401,16 @@ automation:
             {{ t | float(0) if t not in ['unknown', 'unavailable', ''] else 0 }}
       - service: script.smart_charge_evaluate_now
 
-  - id: smart_charge_reach_target
-    alias: Smart charge target SOC reached
-    description: During cheap window, re-evaluate when we hit the target from above or below, or if inverter goes to standby.
+  - id: smart_charge_hold_at_target
+    alias: Smart charge stop at target → standby
+    description: >-
+      When SOC reaches the overnight target during the cheap window, stop force-charge
+      and go standby (grid only) until SOC leaves the hysteresis band.
     mode: single
     trigger:
       - platform: numeric_state
         entity_id: sensor.sofar_ess_battery_soc
         above: input_number.smart_charge_locked_target_soc
-      - platform: template
-        value_template: >-
-          {{ states('sensor.sofar_ess_battery_soc') | float(100) <= states('input_number.smart_charge_locked_target_soc') | float(-1) }}
-      - platform: state
-        entity_id: sensor.sofar_ess_sofar_mode
-        to: standby
     condition:
       - condition: state
         entity_id: input_boolean.smart_charge_enabled
@@ -406,6 +418,76 @@ automation:
       - condition: time
         after: "00:30:00"
         before: "05:30:00"
+      - condition: state
+        entity_id: input_boolean.smart_charge_session_active
+        state: "on"
+      - condition: template
+        value_template: >-
+          {% set soc = states('sensor.sofar_ess_battery_soc') | float(0) %}
+          {% set target = states('input_number.smart_charge_locked_target_soc') | float(0) %}
+          {{ soc <= (target + 2) }}
+    action:
+      - service: script.smart_charge_command_standby
+      - service: script.smart_charge_set_status
+        data:
+          status: holding
+          reason: >-
+            Reached target {{ states('input_number.smart_charge_locked_target_soc') | int }}%
+            — standby (grid); ESS above {{ (states('input_number.smart_charge_locked_target_soc') | float(0) + 2) | int }}%,
+            charge below {{ states('input_number.smart_charge_locked_target_soc') | int }}%
+
+  - id: smart_charge_ess_above_band
+    alias: Smart charge ESS above target+hyst
+    description: >-
+      When SOC rises above locked target + 2% during the cheap window, enable full ESS.
+    mode: single
+    trigger:
+      - platform: template
+        value_template: >-
+          {% set soc = states('sensor.sofar_ess_battery_soc') | float(0) %}
+          {% set target = states('input_number.smart_charge_locked_target_soc') | float(0) %}
+          {{ soc > (target + 2) }}
+    condition:
+      - condition: state
+        entity_id: input_boolean.smart_charge_enabled
+        state: "on"
+      - condition: time
+        after: "00:30:00"
+        before: "05:30:00"
+      - condition: template
+        value_template: >-
+          {{ states('input_text.smart_charge_status') in ['charging', 'holding'] }}
+    action:
+      - service: script.smart_charge_restore_full_ess
+      - service: script.smart_charge_set_status
+        data:
+          status: ess
+          reason: >-
+            SOC {{ states('sensor.sofar_ess_battery_soc') }}% > target
+            {{ states('input_number.smart_charge_locked_target_soc') | int }}% + 2 — ESS on
+
+  - id: smart_charge_resume_if_soc_drops
+    alias: Smart charge resume if SOC drops
+    description: >-
+      Resume force-charge when SOC falls below the locked target while holding standby or ESS
+      in the cheap window.
+    mode: single
+    trigger:
+      - platform: template
+        value_template: >-
+          {% set soc = states('sensor.sofar_ess_battery_soc') | float(100) %}
+          {% set target = states('input_number.smart_charge_locked_target_soc') | float(0) %}
+          {{ soc < target }}
+    condition:
+      - condition: state
+        entity_id: input_boolean.smart_charge_enabled
+        state: "on"
+      - condition: time
+        after: "00:30:00"
+        before: "05:30:00"
+      - condition: template
+        value_template: >-
+          {{ states('input_text.smart_charge_status') in ['ess', 'holding', 'idle'] }}
     action:
       - delay: "00:00:05"
       - service: script.smart_charge_evaluate_now

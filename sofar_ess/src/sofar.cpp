@@ -17,9 +17,12 @@ constexpr uint16_t CMD_CHARGE = 0x0102;
 constexpr uint16_t CMD_AUTO = 0x0103;
 constexpr uint16_t PARAM_STANDBY = 0x5555;
 constexpr uint16_t REG_RUNSTATE = 0x0200;
+constexpr uint16_t REG_FAULT1 = 0x0201;   // fault bytes 0–1 … through REG_FAULT1+4
 constexpr uint16_t REG_BATTW = 0x020d;
 constexpr uint16_t REG_BATTSOC = 0x0210;
 constexpr uint16_t REG_GRIDW = 0x0212;
+constexpr uint16_t REG_ALERT = 0x022b;
+constexpr uint16_t REG_BATTFAULT1 = 0x023d; // batt fault bytes 0–1 … +4
 
 constexpr uint32_t kListenTimeoutMs = 400;
 // A reply that is still in flight when we transmit would be read as the answer
@@ -206,18 +209,207 @@ bool sendPassive(uint16_t cmd, uint16_t param) {
   return (code & 0xff) == 0;
 }
 
-bool readReg(uint16_t reg, uint16_t& value) {
-  uint8_t frame[] = {
-      SOFAR_SLAVE_ID, FN_READ, uint8_t(reg >> 8), uint8_t(reg & 0xff), 0x00, 0x01, 0, 0};
-  Resp rs;
-  if (!sendRaw(frame, sizeof(frame), &rs, FN_READ) || rs.dataSize != 2) {
-    Log.printf("[sofar] read 0x%04X FAIL (%s)\n", reg, listenFailWhy_);
+bool readRegs(uint16_t reg, uint16_t count, uint16_t* values) {
+  if (count == 0 || count > 16 || !values) {
+    listenFailWhy_ = "bad-count";
     return false;
   }
-  value = (uint16_t(rs.data[0]) << 8) | rs.data[1];
+  uint8_t frame[] = {
+      SOFAR_SLAVE_ID,
+      FN_READ,
+      uint8_t(reg >> 8),
+      uint8_t(reg & 0xff),
+      uint8_t(count >> 8),
+      uint8_t(count & 0xff),
+      0,
+      0};
+  Resp rs;
+  const uint8_t expectBytes = uint8_t(count * 2);
+  if (!sendRaw(frame, sizeof(frame), &rs, FN_READ) || rs.dataSize != expectBytes) {
+    Log.printf("[sofar] read 0x%04X x%u FAIL (%s)\n", reg, count, listenFailWhy_);
+    return false;
+  }
+  for (uint16_t i = 0; i < count; i++) {
+    values[i] = (uint16_t(rs.data[i * 2]) << 8) | rs.data[i * 2 + 1];
+  }
   return true;
 }
+
+bool readReg(uint16_t reg, uint16_t& value) {
+  return readRegs(reg, 1, &value);
+}
+
+void setLastError(SofarStatus& cache, const char* why) {
+  if (!why) {
+    why = "";
+  }
+  strncpy(cache.lastError, why, sizeof(cache.lastError) - 1);
+  cache.lastError[sizeof(cache.lastError) - 1] = '\0';
+}
 } // namespace
+
+// Append ",name" (or just "name" if empty) for each set bit in byte using names[8].
+static size_t appendBits(char* out, size_t outLen, size_t used, uint8_t bits, const char* const names[8]) {
+  for (uint8_t b = 0; b < 8; b++) {
+    if (!(bits & (1u << b)) || !names[b] || !names[b][0]) {
+      continue;
+    }
+    const size_t nlen = strlen(names[b]);
+    const size_t need = (used ? 1 : 0) + nlen;
+    if (used + need >= outLen) {
+      break;
+    }
+    if (used) {
+      out[used++] = ',';
+    }
+    memcpy(out + used, names[b], nlen);
+    used += nlen;
+  }
+  if (outLen) {
+    out[used < outLen ? used : outLen - 1] = '\0';
+  }
+  return used;
+}
+
+const char* sofarRunStateName(uint16_t runState) {
+  switch (runState) {
+    case 0:
+      return "wait";
+    case 1:
+      return "check";
+    case 2:
+      return "normal";
+    case 3:
+      return "check_discharge";
+    case 4:
+      return "discharge";
+    case 5:
+      return "eps";
+    case 6:
+      return "fault";
+    case 7:
+      return "permanent_fault";
+    default:
+      return "unknown";
+  }
+}
+
+size_t sofarFormatFaults(const SofarStatus& s, char* out, size_t outLen) {
+  if (!out || outLen == 0) {
+    return 0;
+  }
+  out[0] = '\0';
+  if (!s.faultValid) {
+    return 0;
+  }
+
+  // PDF: Fault Message bytes 0–9. Only named (non-reserved) bits listed.
+  static const char* const byte0[8] = {
+      "GridOVP", "GridUVP", "GridOFP", "GridUFP", "BatOVP", nullptr, nullptr, nullptr};
+  static const char* const byte1[8] = {
+      "HW_LLCBus_OVP", "HW_Boost_OVP", "HwBuckBoostOCP", "HwBatOCP", nullptr, nullptr, "HwAcOCP", nullptr};
+  static const char* const byte2[8] = {
+      "HwADFaultIGrid", "HwADFaultDCI", "HwADFaultVGrid", nullptr, "MChip_Fault", "HwAuxPowerFault", nullptr, nullptr};
+  static const char* const byte3[8] = {
+      "LLCBusOVP", "SwBusOVP", "BatOCP", "DciOCP", "SwOCPInstant", "BuckOCP", "AcRmsOCP", nullptr};
+  static const char* const byte4[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+  static const char* const byte5[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+  static const char* const byte6[8] = {
+      "ConsistentFault_VGrid",
+      "ConsistentFault_FGrid",
+      "ConsistentFault_DCI",
+      "BatCommunication",
+      "SpiCommLose",
+      "SciCommLose",
+      "RecoverRelayFail",
+      nullptr};
+  static const char* const byte7[8] = {
+      "OverTempFault_BAT", "OverTempFault_HeatSink", "OverTempFault_Env", nullptr, nullptr, nullptr, nullptr, nullptr};
+  static const char* const byte8[8] = {
+      "unrecoverHwAcOCP",
+      "unrecoverBusOVP",
+      "unrecoverBatOCP_EPS",
+      nullptr,
+      nullptr,
+      "unrecoverOCPInstant",
+      nullptr,
+      nullptr};
+  static const char* const byte9[8] = {
+      nullptr, nullptr, "unrecoverEEPROM_W", "unrecoverEEPROM_R", "unrecoverRelayFail", nullptr, nullptr, nullptr};
+
+  static const char* const* const bytes[10] = {
+      byte0, byte1, byte2, byte3, byte4, byte5, byte6, byte7, byte8, byte9};
+
+  size_t used = 0;
+  for (uint8_t wi = 0; wi < 5; wi++) {
+    const uint8_t lo = uint8_t(s.fault[wi] & 0xff);         // byte 2*wi
+    const uint8_t hi = uint8_t((s.fault[wi] >> 8) & 0xff);  // byte 2*wi+1
+    used = appendBits(out, outLen, used, lo, bytes[wi * 2]);
+    used = appendBits(out, outLen, used, hi, bytes[wi * 2 + 1]);
+  }
+  if (used == 0 && (s.runState == 6 || s.runState == 7)) {
+    // Fault state but no named bits — still surface raw words.
+    snprintf(out, outLen, "raw:%04X:%04X:%04X:%04X:%04X",
+             s.fault[0], s.fault[1], s.fault[2], s.fault[3], s.fault[4]);
+    return strlen(out);
+  }
+  return used;
+}
+
+size_t sofarFormatAlerts(const SofarStatus& s, char* out, size_t outLen) {
+  if (!out || outLen == 0) {
+    return 0;
+  }
+  out[0] = '\0';
+  if (!s.alertValid) {
+    return 0;
+  }
+  static const char* const alert0[8] = {
+      "OverTempAlarm",
+      "OverFreqAlarm",
+      "RemoteDerate",
+      "RemoteOff",
+      nullptr,
+      nullptr,
+      nullptr,
+      "BatLowVoltageAlarm"};
+  // 0x022B: low byte = alert byte0 (PDF).
+  return appendBits(out, outLen, 0, uint8_t(s.alert & 0xff), alert0);
+}
+
+size_t sofarFormatBattFaults(const SofarStatus& s, char* out, size_t outLen) {
+  if (!out || outLen == 0) {
+    return 0;
+  }
+  out[0] = '\0';
+  if (!s.battFaultValid) {
+    return 0;
+  }
+  static const char* const byte0[8] = {
+      "BatOCD", "BatSCD", "BatOV", "BatUV", "BatOTD", "BatOTC", "BatUTD", "BatUTC"};
+  size_t used = appendBits(out, outLen, 0, uint8_t(s.battFault[0] & 0xff), byte0);
+  // Higher batt-fault bytes are reserved in the PDF; still show raw if any set.
+  bool anyHigher = false;
+  for (uint8_t i = 0; i < 5; i++) {
+    const uint16_t mask = (i == 0) ? 0xff00u : 0xffffu;
+    if (s.battFault[i] & mask) {
+      anyHigher = true;
+      break;
+    }
+  }
+  if (used == 0 && anyHigher) {
+    snprintf(out,
+             outLen,
+             "raw:%04X:%04X:%04X:%04X:%04X",
+             s.battFault[0],
+             s.battFault[1],
+             s.battFault[2],
+             s.battFault[3],
+             s.battFault[4]);
+    return strlen(out);
+  }
+  return used;
+}
 
 bool sofarBegin(HardwareSerial& bus) {
   bus_ = &bus;
@@ -311,13 +503,14 @@ static bool acceptSoc(SofarStatus& cache, uint16_t v) {
 }
 
 bool sofarPollStatusField(SofarStatus& cache) {
-  // One register per call so ESS timing stays predictable (~one Modbus txn).
+  // One Modbus txn per call so ESS timing stays predictable.
+  // Phases: run → grid → batt → soc → fault[5] → alert → battFault[5].
   static uint8_t phase = 0;
   static uint8_t failStreak = 0;
   uint16_t v = 0;
   bool ok = false;
 
-  switch (phase % 4) {
+  switch (phase % 7) {
     case 0:
       ok = readReg(REG_RUNSTATE, v);
       if (ok) {
@@ -338,10 +531,63 @@ bool sofarPollStatusField(SofarStatus& cache) {
         cache.batteryPowerW = decodeBatteryPowerW(cache.runState, cache.batteryPowerRaw);
       }
       break;
-    default:
+    case 3:
       ok = readReg(REG_BATTSOC, v);
       if (ok) {
         ok = acceptSoc(cache, v);
+        if (!ok) {
+          setLastError(cache, "soc-reject");
+        }
+      }
+      break;
+    case 4:
+      ok = readRegs(REG_FAULT1, 5, cache.fault);
+      if (ok) {
+        cache.faultValid = true;
+        if (cache.runState == 6 || cache.runState == 7 ||
+            cache.fault[0] || cache.fault[1] || cache.fault[2] || cache.fault[3] || cache.fault[4]) {
+          char buf[160];
+          sofarFormatFaults(cache, buf, sizeof(buf));
+          Log.printf("[sofar] run=%u(%s) faults=%s raw=%04X %04X %04X %04X %04X\n",
+                     cache.runState,
+                     sofarRunStateName(cache.runState),
+                     buf[0] ? buf : "(none)",
+                     cache.fault[0],
+                     cache.fault[1],
+                     cache.fault[2],
+                     cache.fault[3],
+                     cache.fault[4]);
+        }
+      }
+      break;
+    case 5:
+      ok = readReg(REG_ALERT, v);
+      if (ok) {
+        cache.alert = v;
+        cache.alertValid = true;
+        if (v) {
+          char buf[96];
+          sofarFormatAlerts(cache, buf, sizeof(buf));
+          Log.printf("[sofar] alert=0x%04X %s\n", v, buf[0] ? buf : "(unnamed)");
+        }
+      }
+      break;
+    default:
+      ok = readRegs(REG_BATTFAULT1, 5, cache.battFault);
+      if (ok) {
+        cache.battFaultValid = true;
+        if (cache.battFault[0] || cache.battFault[1] || cache.battFault[2] || cache.battFault[3] ||
+            cache.battFault[4]) {
+          char buf[96];
+          sofarFormatBattFaults(cache, buf, sizeof(buf));
+          Log.printf("[sofar] batt_fault=%s raw=%04X %04X %04X %04X %04X\n",
+                     buf[0] ? buf : "(none)",
+                     cache.battFault[0],
+                     cache.battFault[1],
+                     cache.battFault[2],
+                     cache.battFault[3],
+                     cache.battFault[4]);
+        }
       }
       break;
   }
@@ -354,9 +600,17 @@ bool sofarPollStatusField(SofarStatus& cache) {
     failStreak = 0;
     phase++;
     cache.ok = true;
-  } else if (++failStreak >= 3) {
-    failStreak = 0;
-    phase++;
+    setLastError(cache, "");
+  } else {
+    if (listenFailWhy_[0] && strcmp(cache.lastError, "soc-reject") != 0) {
+      setLastError(cache, listenFailWhy_);
+    } else if (!cache.lastError[0]) {
+      setLastError(cache, listenFailWhy_);
+    }
+    if (++failStreak >= 3) {
+      failStreak = 0;
+      phase++;
+    }
   }
   return ok;
 }
