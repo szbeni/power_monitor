@@ -6,5 +6,6 @@
 include/secrets.h
 sofar_ess/include/secrets.h
 sofar2mqtt/include/secrets.h
+battery_selector/include/secrets.h
 *.log
 .venv
