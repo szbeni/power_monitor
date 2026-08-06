@@ -408,14 +408,20 @@ views:
             entity: sensor.opendtu_60d84c_ac_power
             name: Solar
           - type: entity
+            entity: sensor.home_pv_power
+            name: Solar2
+          - type: entity
             entity: sensor.load_power
             name: Load
           - type: entity
             entity: sensor.sofar_ess_battery_power
             name: Battery
           - type: entity
-            entity: sensor.sofar_ess_battery_soc
-            name: SOC
+            entity: sensor.sofar_ess_battery_combined_soc
+            name: Combined SOC
+          - type: entity
+            entity: sensor.sofar_ess_battery_active
+            name: Active bank
           - type: entity
             entity: sensor.sofar_ess_ess_command
             name: Command
@@ -438,12 +444,42 @@ views:
             name: Load
           - entity: sensor.sofar_ess_battery_power
             name: Battery
-      - type: sensor
-        entity: sensor.sofar_ess_battery_soc
-        graph: line
-        detail: 1
+      - type: history-graph
+        title: Battery SOC (24 h)
         hours_to_show: 24
-        name: Battery SOC (24 h)
+        entities:
+          - entity: sensor.sofar_ess_battery_combined_soc
+            name: Combined
+          - entity: sensor.sofar_ess_battery_a_soc
+            name: Battery A (10 kWh)
+          - entity: sensor.sofar_ess_battery_b_soc
+            name: Battery B (5 kWh)
+      - type: entities
+        title: Dual battery
+        show_header_toggle: false
+        entities:
+          - entity: sensor.sofar_ess_battery_combined_soc
+            name: Combined SOC (15 kWh)
+          - entity: sensor.sofar_ess_battery_soc
+            name: Connected battery SOC
+          - entity: sensor.sofar_ess_battery_a_soc
+            name: Battery A SOC (10 kWh GTX5000)
+          - entity: sensor.sofar_ess_battery_b_soc
+            name: Battery B SOC (5 kWh Fogstar)
+          - type: divider
+          - entity: sensor.sofar_ess_battery_active
+            name: Active bank
+          - entity: sensor.sofar_ess_battery_dual_state
+            name: Switching state
+          - entity: select.sofar_ess_battery_bank
+            name: Bank control
+          - entity: switch.sofar_ess_dual_battery_auto
+            name: Automatic A-first policy
+          - type: divider
+          - entity: number.sofar_ess_battery_empty_soc
+            name: Empty threshold
+          - entity: number.sofar_ess_battery_full_soc
+            name: Full threshold
       - type: entities
         title: Inverter
         show_header_toggle: false
@@ -457,9 +493,9 @@ views:
             name: SOC protect
           - entity: binary_sensor.sofar_ess_ess_soc_protect_active
             name: SOC protect active
-          - entity: number.sofar_ess_soc_protect_low
+          - entity: number.sofar_ess_ess_soc_protect_low
             name: SOC protect low (%)
-          - entity: number.sofar_ess_soc_protect_hyst
+          - entity: number.sofar_ess_ess_soc_protect_hysteresis
             name: SOC protect hysteresis (%)
           - type: divider
           - entity: number.sofar_ess_ess_kp
@@ -470,6 +506,8 @@ views:
             name: Deadband (W)
           - entity: number.sofar_ess_ess_min_delta
             name: Min delta (W)
+          - entity: number.sofar_ess_ess_hold_min
+            name: Near-zero hold (W)
           - type: divider
           - entity: button.sofar_ess_standby
             name: Standby
@@ -489,6 +527,8 @@ views:
             name: Decision
           - entity: sensor.smart_charge_target_soc
             name: Target SOC (live calc)
+          - entity: sensor.smart_charge_battery_soc
+            name: SOC used for decisions
           - entity: input_number.smart_charge_locked_target_soc
             name: Locked overnight target
           - type: divider
@@ -524,12 +564,12 @@ views:
         entities:
           - entity: sensor.opendtu_60d84c_yield_day
             name: Solar yield
+          - entity: sensor.home_today_s_energy
+            name: Solar 2 yield
           - entity: sensor.grid_energy_imported_daily
             name: Grid import
           - entity: sensor.grid_energy_exported_daily
             name: Grid export
-          - entity: sensor.smart_charge_load_energy_daily
-            name: House load (est.)
           - entity: sensor.hms_1600_4t_temperature
             name: Inverter temp
           - entity: sensor.opendtu_60d84c_yield_total
