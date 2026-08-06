@@ -7,16 +7,25 @@ ESP32-C3 SuperMini firmware that combines Sofar2mqtt-style Sofar RS485 control w
 Every ~500 ms:
 
 1. Sample **load2 active power** from MycilaJSY
-2. If ESS enabled, run a **PI** on grid residual `e = P` (`u = Kp·e + Ki·∫e`), then charge/discharge/standby from `u`
+2. If ESS enabled, run a **PI** on grid residual `e = P` (`u = Kp·e + Ki·∫e`), then charge/discharge from `u`
 3. Publish live ESS MQTT topics; `…/state` (~5 s) is **cache-only**. Sofar registers are refreshed one Modbus txn per ESS cycle (run / grid / batt / SOC / fault block / alert / battery-fault).
 
 Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator freezes in the deadband, uses measured `dt`, and has anti-windup at ±MAX.
 
-**Charge-only mode** clamps the ESS command to ≤ 0 W: charge from export / excess, standby on import — never discharge. Toggle via MQTT or HA.
+**ESS near-zero hold:** while ESS is enabled, the PI deadband does **not** send Sofar `standby` (that was causing inverter relay chatter). Instead the firmware holds a small charge or discharge at `ESS_HOLD_MIN_W` (default 30 W) in the last polarity. Explicit `set/standby` and dual-battery bank switches still use real standby.
 
-**SOC protect** (daytime ESS only, separate from overnight smart charging): when bidirectional ESS is running, SOC below the **low threshold** forces charge-only (no discharge); bidirectional resumes once SOC reaches **low + hysteresis** (default 20% / +5%). Tunable via MQTT or HA.
+**Charge-only mode** clamps the ESS command to ≤ 0 W: charge from export / excess, hold charge on import — never discharge. Toggle via MQTT or HA.
+
+**SOC protect** (daytime ESS only, separate from overnight smart charging): when bidirectional ESS is running, SOC below the **low threshold** forces charge-only (no discharge); bidirectional resumes once SOC reaches **low + hysteresis** (default 15% / +5%). Tunable via MQTT or HA.
+
+**Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). Force a bank via `set/battery`. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle → invalidate SOC → re-poll until confirmed.
 
 Inverter must be in **Passive Mode** (same requirement as Sofar2mqtt).
+
+The firmware publishes a capacity-weighted combined SOC:
+`(A_SOC × 10 kWh + B_SOC × 5 kWh) / 15 kWh`. It is unavailable until both
+banks have been observed. `smart_energy.yaml` uses the combined value and falls
+back to the connected bank SOC during initial discovery.
 
 ## Wiring (ESP32-C3 SuperMini)
 
@@ -82,8 +91,8 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 
 | Mode | What it does |
 | ---- | ------------ |
-| **standby** | Battery idle — neither charge nor discharge (~0 W). ESS uses this when grid residual is inside the deadband. |
-| **charge** | Force charge at N watts (AC → battery). |
+| **standby** | Battery idle — neither charge nor discharge (~0 W). Used for manual `set/standby` and during dual-battery bank switches — **not** for ESS deadband. |
+| **charge** | Force charge at N watts (AC → battery). ESS hold uses a small charge instead of standby near zero. |
 | **discharge** | Force discharge at N watts (battery → AC). |
 | **auto** | Hand control back to the **inverter’s own logic** (not the ESS loop). Publishing `set/auto` also **disables ESS**. |
 
@@ -97,7 +106,7 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/ess/battery_power` | pub | Sofar measured battery power (W). +discharge, −charge |
 | `…/ess/energy_import_wh` | pub | JSY channel-2 energy imported from grid (Wh) |
 | `…/ess/energy_export_wh` | pub | JSY channel-2 energy exported to grid (Wh) |
-| `…/ess/command_w` | pub | Last ESS setpoint sent to Sofar (+discharge / −charge / 0=standby) |
+| `…/ess/command_w` | pub | Last ESS setpoint sent to Sofar (+discharge / −charge; near-zero uses hold min, not 0) |
 | `…/ess/mode` | pub | Last Sofar mode string: `standby` / `charge` / `discharge` / `auto` / `unknown` |
 | `…/ess/enabled` | pub | `true` if closed-loop ESS is running; `false` if manual-only |
 | `…/ess/charge_only` | pub | User charge-only preference (`true` / `false`, retained) |
@@ -110,7 +119,18 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/ess/ki` | pub | PI integral gain in 1/s (retained) |
 | `…/ess/deadband` | pub | ESS deadband watts (retained) |
 | `…/ess/min_delta` | pub | Min command change watts (retained) |
+| `…/ess/hold_min` | pub | Near-zero hold watts instead of standby (retained) |
 | `…/ess/integral` | pub | Current integrator state |
+| `…/battery/active` | pub | Connected bank `A` / `B` (retained) |
+| `…/battery/a/soc` | pub | Last-known bank A SOC % or `null` (retained) |
+| `…/battery/b/soc` | pub | Last-known bank B SOC % or `null` (retained) |
+| `…/battery/combined_soc` | pub | Capacity-weighted 15 kWh combined SOC, or `null` until both banks are known (retained) |
+| `…/battery/dual_state` | pub | `idle` / `switching` / `settling` / `syncing` / `error` (retained) |
+| `…/battery/force` | pub | `off` / `A` / `B` (retained) |
+| `…/battery/force_select` | pub | HA select state: `Auto` / `Battery A` / `Battery B` (retained) |
+| `…/battery/empty` | pub | Empty SOC threshold % (retained) |
+| `…/battery/full` | pub | Full SOC threshold % (retained) |
+| `…/battery/dual_enabled` | pub | Auto dual-battery policy on/off (retained) |
 | `…/set/ess` | sub | `true` / `false` — enable/disable; `charge_only` = enable + soak-only; `full` = enable + bidirectional |
 | `…/set/charge_only` | sub | `true` / `false` — user charge-only preference (cmd ≤ 0) |
 | `…/set/soc_protect` | sub | `true` / `false` — enable SOC-based charge-only protect |
@@ -120,6 +140,11 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/set/ki` | sub | float 0…5 — set Ki live (1/s) |
 | `…/set/deadband` | sub | float 0…500 — deadband watts |
 | `…/set/min_delta` | sub | float 0…500 — min Sofar command delta watts |
+| `…/set/hold_min` | sub | int 1…MAX — ESS near-zero hold watts |
+| `…/set/dual_batt` | sub | `true` / `false` — enable A-prefer auto bank switching |
+| `…/set/dual_batt_empty` | sub | int 0…100 — empty threshold % (default 10) |
+| `…/set/dual_batt_full` | sub | int 0…100 — full threshold % (default 98) |
+| `…/set/battery` | sub | `Auto` / `Battery A` / `Battery B` / `A` / `B` — force bank or clear force |
 | `…/set/reset_i` | sub | any — clear PI integrator |
 | `…/set/standby` | sub | `true` — force standby (battery idle). **Disables ESS** |
 | `…/set/auto` | sub | `true` — Sofar auto (inverter self-control). **Disables ESS** |
@@ -129,12 +154,17 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/set/discharge` | sub | watts (1…MAX) — force discharge. **Disables ESS** |
 | `…/response/<cmd>` | pub | `0` = OK after a manual set command |
 
+Also publishes to `battery_selector/set/select` and subscribes to `battery_selector/selected`.
+
 Example:
 ```bash
 mosquitto_pub -t sofaress/set/kp -m 0.4
 mosquitto_pub -t sofaress/set/ki -m 0.3
 mosquitto_pub -t sofaress/set/deadband -m 20
 mosquitto_pub -t sofaress/set/min_delta -m 10
+mosquitto_pub -t sofaress/set/hold_min -m 30
+mosquitto_pub -t sofaress/set/battery -m "Battery B"
+mosquitto_pub -t sofaress/set/battery -m Auto
 ```
 
 ### `…/state` JSON fields
@@ -150,10 +180,15 @@ mosquitto_pub -t sofaress/set/min_delta -m 10
 | `energy_import_wh` / `energy_export_wh` | JSY energy totals |
 | `ess_command_w` | Last commanded battery offset (W) |
 | `ess_kp` / `ess_ki` | Live PI gains |
-| `ess_deadband_w` / `ess_min_delta_w` | Live deadband / min command delta |
+| `ess_deadband_w` / `ess_min_delta_w` / `ess_hold_min_w` | Live deadband / min command delta / near-zero hold |
 | `ess_integral` | Integrator state |
 | `sofar_mode` | `standby` / `charge` / `discharge` / `auto` / `unknown` |
 | `charge_target_soc` | Manual charge stop target % (0 = no limit) |
+| `battery_active` / `battery_force` / `battery_dual_state` | Dual-battery active bank, force, state machine |
+| `battery_dual_enabled` / `battery_empty_soc` / `battery_full_soc` | Dual-battery policy config |
+| `battery_a_soc` / `battery_b_soc` | Per-bank last-known SOC (`null` if never seen) |
+| `battery_combined_soc` | Capacity-weighted combined SOC (`null` until both banks are known) |
+| `battery_a_kwh` / `battery_b_kwh` | Configured capacities (10 / 5) |
 | `sofar_ok` | `true` once any Sofar Modbus read succeeds; `false` = RS485 never OK |
 | `sofar_last_error` | Last Modbus fail reason (`no-rx`, `timeout`, `crc`, `exception`, …) |
 | `run_state` | Sofar run-state register (0–7) when RS485 OK |
@@ -182,10 +217,11 @@ mosquitto_pub -t sofaress/set/charge_only -m true
 
 With MQTT discovery enabled (`HA_MQTT_DISCOVERY=1`, default), device **Sofar ESS** appears when MQTT connects.
 
-- Sensors: grid / battery power, ESS command, SOC, energy import/export, Sofar mode, run state / name, fault / alert / battery-fault messages, Sofar last error  
+- Sensors: grid / battery power, ESS command, SOC (live + A/B + combined), active bank, dual state, energy import/export, Sofar mode, run state / name, fault / alert / battery-fault messages, Sofar last error  
 - Binary sensors: Sofar OK (RS485), Sofar fault active, ESS SOC protect active  
-- Switch: ESS enabled, ESS charge only, ESS SOC protect  
-- Numbers: ESS Kp, ESS Ki, Deadband, Min Delta, SOC protect low, SOC protect hysteresis  
+- Switch: ESS enabled, ESS charge only, ESS SOC protect, Dual Battery Auto  
+- Select: Battery Bank (`Auto` / `Battery A` / `Battery B`)  
+- Numbers: ESS Kp, ESS Ki, Deadband, Min Delta, Hold Min, SOC protect low/hyst, Battery empty/full SOC  
 - Buttons: Standby, Auto, Reset Integral  
 
 If **Sofar OK** stays off, check `sofar_last_error` (`no-rx` = wiring/DE/slave ID; `crc` = noise/baud; `exception` = bad register). Inverter **fault** run-state is separate — use **Sofar Fault** / **fault_raw** from the PDF fault-message registers.

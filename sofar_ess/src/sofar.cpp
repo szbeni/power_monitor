@@ -477,29 +477,74 @@ bool sofarDischarge(uint16_t watts) {
 
 // SoC must be 0..100. A large step is more likely a mis-paired reply than a
 // real jump, so make it prove itself on the next poll before we believe it.
-static bool acceptSoc(SofarStatus& cache, uint16_t v) {
-  static uint16_t pending = 0;
-  static bool havePending = false;
+static uint16_t socPending_ = 0;
+static bool socHavePending_ = false;
+static bool preferSocPoll_ = false;
+static bool requireSocConfirm_ = false;
 
+static bool acceptSoc(SofarStatus& cache, uint16_t v) {
   if (v > 100) {
     Log.printf("[sofar] SoC %u out of range — ignored\n", v);
-    havePending = false;
+    socHavePending_ = false;
     return false;
+  }
+
+  // After a bank switch, always require two matching reads before trusting SOC.
+  if (requireSocConfirm_) {
+    if (!(socHavePending_ && socPending_ == v)) {
+      Log.printf("[sofar] SoC post-switch %u — waiting for confirmation\n", v);
+      socPending_ = v;
+      socHavePending_ = true;
+      return false;
+    }
+    requireSocConfirm_ = false;
   }
 
   const int delta = int(v) - int(cache.batterySoc);
   const bool jump = cache.socValid && (delta > 20 || delta < -20);
-  if (jump && !(havePending && pending == v)) {
+  if (jump && !(socHavePending_ && socPending_ == v)) {
     Log.printf("[sofar] SoC jump %u -> %u — waiting for confirmation\n", cache.batterySoc, v);
-    pending = v;
-    havePending = true;
+    socPending_ = v;
+    socHavePending_ = true;
     return false;
   }
 
-  havePending = false;
+  socHavePending_ = false;
   cache.batterySoc = v;
   cache.socValid = true;
   return true;
+}
+
+void sofarInvalidateSoc(SofarStatus& cache) {
+  cache.socValid = false;
+  cache.batterySoc = 0;
+  socHavePending_ = false;
+  socPending_ = 0;
+  requireSocConfirm_ = true;
+  Log.println("[sofar] SoC invalidated (awaiting new bank)");
+}
+
+void sofarPreferSocPoll(bool enable) {
+  preferSocPoll_ = enable;
+}
+
+bool sofarPollSocNow(SofarStatus& cache) {
+  if (!bus_) {
+    return false;
+  }
+  uint16_t v = 0;
+  if (!readReg(REG_BATTSOC, v)) {
+    setLastError(cache, listenFailWhy_);
+    return false;
+  }
+  const bool ok = acceptSoc(cache, v);
+  if (!ok) {
+    setLastError(cache, "soc-reject");
+  } else {
+    cache.ok = true;
+    setLastError(cache, "");
+  }
+  return ok;
 }
 
 bool sofarPollStatusField(SofarStatus& cache) {
@@ -509,6 +554,11 @@ bool sofarPollStatusField(SofarStatus& cache) {
   static uint8_t failStreak = 0;
   uint16_t v = 0;
   bool ok = false;
+
+  // After a bank switch, bias every poll toward SOC until acceptSoc succeeds.
+  if (preferSocPoll_) {
+    phase = 3;
+  }
 
   switch (phase % 7) {
     case 0:
@@ -537,6 +587,8 @@ bool sofarPollStatusField(SofarStatus& cache) {
         ok = acceptSoc(cache, v);
         if (!ok) {
           setLastError(cache, "soc-reject");
+        } else if (preferSocPoll_) {
+          preferSocPoll_ = false;
         }
       }
       break;

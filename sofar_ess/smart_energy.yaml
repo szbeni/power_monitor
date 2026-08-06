@@ -52,7 +52,7 @@ input_number:
     step: 0.1
     unit_of_measurement: kWh
     icon: mdi:battery
-    initial: 10
+    initial: 15
     mode: box
   smart_charge_power_w:
     name: Smart charge power
@@ -155,6 +155,29 @@ template:
             {% set corr = states('input_number.smart_charge_forecast_correction') | float(1) %}
             {{ (raw | float(0) * corr) | round(2) }}
           {% endif %}
+
+      - name: Smart Charge Battery SOC
+        unique_id: smart_charge_battery_soc
+        unit_of_measurement: "%"
+        device_class: battery
+        icon: mdi:battery-sync
+        availability: >-
+          {{ states('sensor.sofar_ess_battery_combined_soc')
+             not in ['unknown', 'unavailable', 'none', ''] or
+             states('sensor.sofar_ess_battery_soc')
+             not in ['unknown', 'unavailable', 'none', ''] }}
+        state: >-
+          {% set combined = states('sensor.sofar_ess_battery_combined_soc') %}
+          {% if combined not in ['unknown', 'unavailable', 'none', ''] %}
+            {{ combined | float | round(1) }}
+          {% else %}
+            {{ states('sensor.sofar_ess_battery_soc') | float | round(1) }}
+          {% endif %}
+        attributes:
+          source: >-
+            {% set combined = states('sensor.sofar_ess_battery_combined_soc') %}
+            {{ 'combined' if combined not in ['unknown', 'unavailable', 'none', '']
+               else 'connected_fallback' }}
 
       - name: Smart Charge Target SOC
         unique_id: smart_charge_target_soc
@@ -276,7 +299,7 @@ script:
     icon: mdi:calculator-variant
     sequence:
       - variables:
-          soc_raw: "{{ states('sensor.sofar_ess_battery_soc') }}"
+          soc_raw: "{{ states('sensor.smart_charge_battery_soc') }}"
           forecast_ent: "{{ states('sensor.smart_charge_forecast_entity') }}"
           forecast_raw: "{{ states(states('sensor.smart_charge_forecast_entity')) }}"
           target_live: "{{ states('sensor.smart_charge_target_soc') | int(80) }}"
@@ -409,7 +432,7 @@ automation:
     mode: single
     trigger:
       - platform: numeric_state
-        entity_id: sensor.sofar_ess_battery_soc
+        entity_id: sensor.smart_charge_battery_soc
         above: input_number.smart_charge_locked_target_soc
     condition:
       - condition: state
@@ -423,7 +446,7 @@ automation:
         state: "on"
       - condition: template
         value_template: >-
-          {% set soc = states('sensor.sofar_ess_battery_soc') | float(0) %}
+          {% set soc = states('sensor.smart_charge_battery_soc') | float(0) %}
           {% set target = states('input_number.smart_charge_locked_target_soc') | float(0) %}
           {{ soc <= (target + 2) }}
     action:
@@ -444,7 +467,7 @@ automation:
     trigger:
       - platform: template
         value_template: >-
-          {% set soc = states('sensor.sofar_ess_battery_soc') | float(0) %}
+          {% set soc = states('sensor.smart_charge_battery_soc') | float(0) %}
           {% set target = states('input_number.smart_charge_locked_target_soc') | float(0) %}
           {{ soc > (target + 2) }}
     condition:
@@ -463,7 +486,7 @@ automation:
         data:
           status: ess
           reason: >-
-            SOC {{ states('sensor.sofar_ess_battery_soc') }}% > target
+            SOC {{ states('sensor.smart_charge_battery_soc') }}% > target
             {{ states('input_number.smart_charge_locked_target_soc') | int }}% + 2 — ESS on
 
   - id: smart_charge_resume_if_soc_drops
@@ -475,7 +498,7 @@ automation:
     trigger:
       - platform: template
         value_template: >-
-          {% set soc = states('sensor.sofar_ess_battery_soc') | float(100) %}
+          {% set soc = states('sensor.smart_charge_battery_soc') | float(100) %}
           {% set target = states('input_number.smart_charge_locked_target_soc') | float(0) %}
           {{ soc < target }}
     condition:
@@ -577,7 +600,7 @@ automation:
     mode: single
     trigger:
       - platform: state
-        entity_id: sensor.sofar_ess_battery_soc
+        entity_id: sensor.smart_charge_battery_soc
         to:
           - unavailable
           - unknown

@@ -111,6 +111,47 @@
 #define ESS_REFRESH_MS 60000
 #endif
 
+// ESS near-zero hold (W): stay in charge/discharge instead of standby to avoid
+// Sofar internal relay chatter when PI output is inside the deadband.
+#ifndef ESS_HOLD_MIN_W
+#define ESS_HOLD_MIN_W 30
+#endif
+
+// Dual battery banks via battery_selector MQTT (A = prefer, B = secondary).
+#ifndef DUAL_BATT_ENABLE
+#define DUAL_BATT_ENABLE 1
+#endif
+#ifndef DUAL_BATT_EMPTY_SOC
+#define DUAL_BATT_EMPTY_SOC 10
+#endif
+#ifndef DUAL_BATT_FULL_SOC
+#define DUAL_BATT_FULL_SOC 98
+#endif
+#ifndef DUAL_BATT_SETTLE_MS
+#define DUAL_BATT_SETTLE_MS 8000
+#endif
+#ifndef DUAL_BATT_COOLDOWN_MS
+#define DUAL_BATT_COOLDOWN_MS 60000
+#endif
+#ifndef DUAL_BATT_CONFIRM_TIMEOUT_MS
+#define DUAL_BATT_CONFIRM_TIMEOUT_MS 10000
+#endif
+#ifndef DUAL_BATT_SOC_SYNC_TIMEOUT_MS
+#define DUAL_BATT_SOC_SYNC_TIMEOUT_MS 20000
+#endif
+#ifndef DUAL_BATT_SELECTOR_TOPIC
+#define DUAL_BATT_SELECTOR_TOPIC "battery_selector"
+#endif
+#ifndef DUAL_BATT_A_KWH
+#define DUAL_BATT_A_KWH 10.0f
+#endif
+#ifndef DUAL_BATT_B_KWH
+#define DUAL_BATT_B_KWH 5.0f
+#endif
+#ifndef DUAL_BATT_DEFAULT_BANK
+#define DUAL_BATT_DEFAULT_BANK 1 // 1=A, 2=B
+#endif
+
 // PI gains for zero-export (Ts = ESS_LOOP_INTERVAL_MS). Tunable via MQTT set/kp|ki.
 // u = Kp*e + Ki*∫e  with e = grid_power_w (+import → +discharge).
 #ifndef ESS_KP

@@ -40,6 +40,7 @@ static float essKp = ESS_KP;
 static float essKi = ESS_KI;
 static float essDeadbandW = float(ESS_DEADBAND_W);
 static float essMinDeltaW = float(ESS_MIN_DELTA_W);
+static uint16_t essHoldMinW = ESS_HOLD_MIN_W;
 static float essIntegral = 0.0f;
 static float lastGridPowerW = NAN;
 static float lastEnergyImportWh = NAN;
@@ -52,6 +53,36 @@ static uint32_t lastMqttStateMs = 0;
 static uint32_t lastCmdMs = 0;
 static int16_t lastCmdW = 0; // +discharge, -charge, 0=standby
 static uint8_t chargeTargetSoc = 0; // 0 = no limit; manual charge stops at target → standby
+
+#if DUAL_BATT_ENABLE
+enum class DualBattState : uint8_t {
+  Idle = 0,
+  Standby,
+  CommandRelay,
+  WaitConfirm,
+  Settling,
+  SyncSoc,
+  Error,
+};
+
+static bool dualBattEnabled = true;
+static uint8_t dualBattActive = DUAL_BATT_DEFAULT_BANK; // 1=A, 2=B
+static uint8_t dualBattForce = 0;                       // 0=auto, 1=A, 2=B
+static uint8_t dualBattTarget = 0;                      // bank being switched to (0=none)
+static DualBattState dualBattState = DualBattState::Idle;
+static uint8_t dualBattEmptySoc = DUAL_BATT_EMPTY_SOC;
+static uint8_t dualBattFullSoc = DUAL_BATT_FULL_SOC;
+static uint8_t dualBattSocA = 0;
+static uint8_t dualBattSocB = 0;
+static bool dualBattSocAValid = false;
+static bool dualBattSocBValid = false;
+static uint32_t dualBattStateMs = 0;
+static uint32_t dualBattLastSwitchMs = 0;
+static bool dualBattSelectedMatch = false;
+static uint8_t dualBattReportedSelected = 0; // from selector MQTT, 0=unknown
+static int16_t dualBattResumeCmdW = 0;
+#endif
+
 #if HA_MQTT_DISCOVERY
 static bool haDiscoverySent = false;
 #endif
@@ -90,6 +121,7 @@ static void publishEssParams() {
   mqttPublish("ess/ki", String(essKi, 3), true);
   mqttPublish("ess/deadband", String(essDeadbandW, 1), true);
   mqttPublish("ess/min_delta", String(essMinDeltaW, 1), true);
+  mqttPublish("ess/hold_min", String(essHoldMinW), true);
   mqttPublish("ess/charge_only", essChargeOnlyUser ? "true" : "false", true);
   mqttPublish("ess/effective_charge_only", essEffectiveChargeOnly() ? "true" : "false", true);
   publishSocProtectParams();
@@ -177,6 +209,357 @@ static void publishChargeTargetSoc() {
   mqttPublish("charge/target_soc", String(chargeTargetSoc), true);
 }
 
+#if DUAL_BATT_ENABLE
+static const char* dualBattStateName(DualBattState s) {
+  switch (s) {
+    case DualBattState::Idle:
+      return "idle";
+    case DualBattState::Standby:
+      return "standby";
+    case DualBattState::CommandRelay:
+      return "switching";
+    case DualBattState::WaitConfirm:
+      return "switching";
+    case DualBattState::Settling:
+      return "settling";
+    case DualBattState::SyncSoc:
+      return "syncing";
+    case DualBattState::Error:
+      return "error";
+    default:
+      return "unknown";
+  }
+}
+
+static const char* dualBattLabel(uint8_t bank) {
+  return (bank == 2) ? "B" : "A";
+}
+
+static const char* dualBattHaLabel(uint8_t bank) {
+  return (bank == 2) ? "Battery B" : "Battery A";
+}
+
+static const char* dualBattForceLabel() {
+  if (dualBattForce == 1) {
+    return "A";
+  }
+  if (dualBattForce == 2) {
+    return "B";
+  }
+  return "off";
+}
+
+static bool dualBattBusy() {
+  return dualBattState != DualBattState::Idle && dualBattState != DualBattState::Error;
+}
+
+static float dualBattCombinedSoc() {
+  if (!dualBattSocAValid || !dualBattSocBValid) {
+    return NAN;
+  }
+  const float totalKwh = DUAL_BATT_A_KWH + DUAL_BATT_B_KWH;
+  if (totalKwh <= 0.0f) {
+    return NAN;
+  }
+  return (float(dualBattSocA) * DUAL_BATT_A_KWH +
+          float(dualBattSocB) * DUAL_BATT_B_KWH) /
+         totalKwh;
+}
+
+static void publishDualBatt() {
+  mqttPublish("battery/active", dualBattLabel(dualBattActive), true);
+  mqttPublish("battery/dual_state", dualBattStateName(dualBattState), true);
+  mqttPublish("battery/force", dualBattForceLabel(), true);
+  mqttPublish("battery/empty", String(dualBattEmptySoc), true);
+  mqttPublish("battery/full", String(dualBattFullSoc), true);
+  mqttPublish("battery/dual_enabled", dualBattEnabled ? "true" : "false", true);
+  if (dualBattSocAValid) {
+    mqttPublish("battery/a/soc", String(dualBattSocA), true);
+  } else {
+    mqttPublish("battery/a/soc", "null", true);
+  }
+  if (dualBattSocBValid) {
+    mqttPublish("battery/b/soc", String(dualBattSocB), true);
+  } else {
+    mqttPublish("battery/b/soc", "null", true);
+  }
+  const float combinedSoc = dualBattCombinedSoc();
+  mqttPublish("battery/combined_soc",
+              isnan(combinedSoc) ? String("null") : String(combinedSoc, 1),
+              true);
+  // HA select state: Auto / Battery A / Battery B
+  const char* forceHa = "Auto";
+  if (dualBattForce == 1) {
+    forceHa = "Battery A";
+  } else if (dualBattForce == 2) {
+    forceHa = "Battery B";
+  }
+  mqttPublish("battery/force_select", forceHa, true);
+}
+
+static void dualBattSetState(DualBattState next) {
+  if (dualBattState == next) {
+    return;
+  }
+  dualBattState = next;
+  dualBattStateMs = millis();
+  Log.printf("[dual] state=%s active=%s target=%s\n",
+             dualBattStateName(dualBattState),
+             dualBattLabel(dualBattActive),
+             dualBattTarget ? dualBattLabel(dualBattTarget) : "-");
+  mqttPublish("battery/dual_state", dualBattStateName(dualBattState), true);
+}
+
+static void dualBattUpdateCacheFromLive() {
+  if (!lastSofar.socValid || dualBattBusy()) {
+    return;
+  }
+  const uint8_t soc = uint8_t(lastSofar.batterySoc);
+  bool changed = false;
+  if (dualBattActive == 2) {
+    changed = !dualBattSocBValid || dualBattSocB != soc;
+    dualBattSocB = soc;
+    dualBattSocBValid = true;
+  } else {
+    changed = !dualBattSocAValid || dualBattSocA != soc;
+    dualBattSocA = soc;
+    dualBattSocAValid = true;
+  }
+  if (changed) {
+    publishDualBatt();
+  }
+}
+
+static bool dualBattPublishSelect(uint8_t bank) {
+  if (!mqtt.connected()) {
+    return false;
+  }
+  const String topic = String(DUAL_BATT_SELECTOR_TOPIC) + "/set/select";
+  const char* payload = dualBattHaLabel(bank);
+  const bool ok = mqtt.publish(topic.c_str(), payload, false);
+  Log.printf("[dual] select -> %s (%s)\n", payload, ok ? "ok" : "fail");
+  return ok;
+}
+
+static uint8_t dualBattParseBank(const String& msg, bool allowAuto) {
+  if (allowAuto &&
+      (msg.equalsIgnoreCase("auto") || msg.equalsIgnoreCase("off") || msg == "0" ||
+       msg.equalsIgnoreCase("false"))) {
+    return 0;
+  }
+  if (msg == "1" || msg.equalsIgnoreCase("A") || msg.equalsIgnoreCase("Battery A") ||
+      msg.equalsIgnoreCase("battery_a") || msg.equalsIgnoreCase("batterya")) {
+    return 1;
+  }
+  if (msg == "2" || msg.equalsIgnoreCase("B") || msg.equalsIgnoreCase("Battery B") ||
+      msg.equalsIgnoreCase("battery_b") || msg.equalsIgnoreCase("batteryb")) {
+    return 2;
+  }
+  return 255; // invalid
+}
+
+static void dualBattOnSelected(const String& msg) {
+  const uint8_t bank = dualBattParseBank(msg, false);
+  if (bank == 255) {
+    Log.printf("[dual] ignore selected payload '%s'\n", msg.c_str());
+    return;
+  }
+  dualBattReportedSelected = bank;
+  if (dualBattState == DualBattState::WaitConfirm && dualBattTarget == bank) {
+    dualBattSelectedMatch = true;
+    Log.printf("[dual] selector confirmed %s\n", dualBattLabel(bank));
+  }
+}
+
+static void dualBattBeginSwitch(uint8_t bank) {
+  if (bank != 1 && bank != 2) {
+    return;
+  }
+  if (bank == dualBattActive && dualBattState == DualBattState::Idle) {
+    Log.printf("[dual] already on %s\n", dualBattLabel(bank));
+    return;
+  }
+  if (dualBattBusy()) {
+    Log.println("[dual] switch ignored — already switching");
+    return;
+  }
+  dualBattTarget = bank;
+  dualBattSelectedMatch = false;
+  dualBattResumeCmdW = lastCmdW;
+  dualBattSetState(DualBattState::Standby);
+}
+
+static void dualBattRequestBank(uint8_t bank) {
+  if (!dualBattEnabled && dualBattForce == 0) {
+    return;
+  }
+  if (bank == dualBattActive || bank == 0) {
+    return;
+  }
+  const uint32_t now = millis();
+  if (dualBattLastSwitchMs != 0 && (now - dualBattLastSwitchMs) < DUAL_BATT_COOLDOWN_MS) {
+    Log.printf("[dual] cooldown %lu ms left\n",
+               static_cast<unsigned long>(DUAL_BATT_COOLDOWN_MS - (now - dualBattLastSwitchMs)));
+    return;
+  }
+  dualBattBeginSwitch(bank);
+}
+
+static void dualBattEvaluatePolicy() {
+  if (!dualBattEnabled || dualBattBusy()) {
+    return;
+  }
+
+  // Force override: keep requested bank connected.
+  if (dualBattForce == 1 || dualBattForce == 2) {
+    if (dualBattForce != dualBattActive) {
+      dualBattRequestBank(dualBattForce);
+    }
+    return;
+  }
+
+  // Intent from last ESS/manual command. Near-zero hold does not switch banks.
+  const bool wantDischarge = lastCmdW > int16_t(essHoldMinW);
+  const bool wantCharge = lastCmdW < -int16_t(essHoldMinW);
+  if (!wantDischarge && !wantCharge) {
+    return;
+  }
+
+  const bool aKnown = dualBattSocAValid;
+  const bool bKnown = dualBattSocBValid;
+  const bool aEmpty = aKnown && dualBattSocA <= dualBattEmptySoc;
+  const bool bEmpty = bKnown && dualBattSocB <= dualBattEmptySoc;
+  const bool aFull = aKnown && dualBattSocA >= dualBattFullSoc;
+  const bool bFull = bKnown && dualBattSocB >= dualBattFullSoc;
+
+  if (wantDischarge) {
+    if (dualBattActive == 1) {
+      // A empty → try B unless we know B is also empty.
+      if (aEmpty && (!bKnown || !bEmpty)) {
+        dualBattRequestBank(2);
+      }
+    } else {
+      // Prefer A whenever it may still have energy.
+      if (!aKnown || !aEmpty) {
+        dualBattRequestBank(1);
+      }
+    }
+  } else if (wantCharge) {
+    if (dualBattActive == 1) {
+      if (aFull && (!bKnown || !bFull)) {
+        dualBattRequestBank(2);
+      }
+    } else {
+      if (!aKnown || !aFull) {
+        dualBattRequestBank(1);
+      }
+    }
+  }
+}
+
+static void dualBattTick() {
+  const uint32_t now = millis();
+
+  switch (dualBattState) {
+    case DualBattState::Idle:
+      dualBattEvaluatePolicy();
+      break;
+
+    case DualBattState::Standby:
+      if (sofarStandby()) {
+        lastCmdW = 0;
+        lastCmdMs = now;
+        mqttPublish("ess/mode", modeName(SofarMode::Standby));
+        dualBattSetState(DualBattState::CommandRelay);
+      } else if (now - dualBattStateMs > 5000) {
+        Log.println("[dual] standby timeout");
+        dualBattSetState(DualBattState::Error);
+      }
+      break;
+
+    case DualBattState::CommandRelay:
+      dualBattSelectedMatch = false;
+      if (dualBattPublishSelect(dualBattTarget)) {
+        dualBattSetState(DualBattState::WaitConfirm);
+      } else if (now - dualBattStateMs > 5000) {
+        Log.println("[dual] MQTT select publish failed");
+        dualBattSetState(DualBattState::Error);
+      }
+      break;
+
+    case DualBattState::WaitConfirm:
+      if (dualBattSelectedMatch ||
+          (dualBattReportedSelected != 0 && dualBattReportedSelected == dualBattTarget)) {
+        dualBattSelectedMatch = true;
+        dualBattSetState(DualBattState::Settling);
+      } else if (now - dualBattStateMs > DUAL_BATT_CONFIRM_TIMEOUT_MS) {
+        Log.println("[dual] selector confirm timeout");
+        dualBattSetState(DualBattState::Error);
+      }
+      break;
+
+    case DualBattState::Settling:
+      if (now - dualBattStateMs >= DUAL_BATT_SETTLE_MS) {
+        sofarInvalidateSoc(lastSofar);
+        sofarPreferSocPoll(true);
+        dualBattSetState(DualBattState::SyncSoc);
+      }
+      break;
+
+    case DualBattState::SyncSoc:
+      if (sofarPollSocNow(lastSofar) && lastSofar.socValid) {
+        dualBattActive = dualBattTarget;
+        dualBattTarget = 0;
+        dualBattLastSwitchMs = now;
+        sofarPreferSocPoll(false);
+        if (dualBattActive == 2) {
+          dualBattSocB = uint8_t(lastSofar.batterySoc);
+          dualBattSocBValid = true;
+        } else {
+          dualBattSocA = uint8_t(lastSofar.batterySoc);
+          dualBattSocAValid = true;
+        }
+        lastSofarOk = true;
+        dualBattSetState(DualBattState::Idle);
+        publishDualBatt();
+        bool resumed = true;
+        if (dualBattResumeCmdW > 0) {
+          resumed = sofarDischarge(uint16_t(dualBattResumeCmdW));
+        } else if (dualBattResumeCmdW < 0) {
+          resumed = sofarCharge(uint16_t(-dualBattResumeCmdW));
+        }
+        if (dualBattResumeCmdW != 0 && resumed) {
+          lastCmdW = dualBattResumeCmdW;
+          lastCmdMs = now;
+        }
+        dualBattResumeCmdW = 0;
+        Log.printf("[dual] synced %s SOC=%u\n",
+                   dualBattLabel(dualBattActive),
+                   unsigned(lastSofar.batterySoc));
+      } else if (now - dualBattStateMs > DUAL_BATT_SOC_SYNC_TIMEOUT_MS) {
+        Log.println("[dual] SOC sync timeout");
+        sofarPreferSocPoll(false);
+        // Still adopt the bank — BMS may need longer; live SOC will catch up.
+        dualBattActive = dualBattTarget;
+        dualBattTarget = 0;
+        dualBattLastSwitchMs = now;
+        dualBattSetState(DualBattState::Error);
+        publishDualBatt();
+      }
+      break;
+
+    case DualBattState::Error:
+      // Auto-recover to idle after cooldown so policy can retry.
+      if (now - dualBattStateMs > DUAL_BATT_COOLDOWN_MS) {
+        dualBattTarget = 0;
+        dualBattSetState(DualBattState::Idle);
+        publishDualBatt();
+      }
+      break;
+  }
+}
+#endif // DUAL_BATT_ENABLE
+
 // Manual charge (ESS off): stop at chargeTargetSoc and go standby.
 static void checkChargeTargetSoc() {
   if (essEnabled || chargeTargetSoc == 0) {
@@ -188,7 +571,14 @@ static void checkChargeTargetSoc() {
   if (!lastSofar.socValid) {
     return;
   }
-  if (lastSofar.batterySoc < chargeTargetSoc) {
+  float effectiveSoc = float(lastSofar.batterySoc);
+#if DUAL_BATT_ENABLE
+  const float combinedSoc = dualBattCombinedSoc();
+  if (!isnan(combinedSoc)) {
+    effectiveSoc = combinedSoc;
+  }
+#endif
+  if (effectiveSoc < float(chargeTargetSoc)) {
     return;
   }
 
@@ -198,7 +588,9 @@ static void checkChargeTargetSoc() {
     lastCmdMs = millis();
     chargeTargetSoc = 0;
     publishChargeTargetSoc();
-    Log.printf("[charge] target SOC %u reached — standby\n", hit);
+    Log.printf("[charge] target SOC %u reached (effective %.1f%%) — standby\n",
+               hit,
+               effectiveSoc);
     mqttPublish("ess/mode", modeName(sofarLastMode()));
   }
 }
@@ -218,6 +610,11 @@ static const HaSensor kHaSensors[] = {
     {"battery_power", "Battery Power", "{{ value_json.battery_power_w }}", "W", "power", "measurement"},
     {"ess_command", "ESS Command", "{{ value_json.ess_command_w }}", "W", "power", "measurement"},
     {"battery_soc", "Battery SOC", "{{ value_json.battery_soc }}", "%", "battery", "measurement"},
+    {"battery_a_soc", "Battery A SOC", "{{ value_json.battery_a_soc }}", "%", "battery", "measurement"},
+    {"battery_b_soc", "Battery B SOC", "{{ value_json.battery_b_soc }}", "%", "battery", "measurement"},
+    {"battery_combined_soc", "Battery Combined SOC", "{{ value_json.battery_combined_soc }}", "%", "battery", "measurement"},
+    {"battery_active", "Battery Active", "{{ value_json.battery_active }}", nullptr, nullptr, nullptr},
+    {"battery_dual_state", "Battery Dual State", "{{ value_json.battery_dual_state }}", nullptr, nullptr, nullptr},
     {"energy_import", "Energy Import", "{{ value_json.energy_import_wh }}", "Wh", "energy", "total_increasing"},
     {"energy_export", "Energy Export", "{{ value_json.energy_export_wh }}", "Wh", "energy", "total_increasing"},
     {"sofar_mode", "Sofar Mode", "{{ value_json.sofar_mode }}", nullptr, nullptr, nullptr},
@@ -431,8 +828,13 @@ static void publishHaDiscovery() {
       {"ki", "ESS Ki", "ess/ki", "set/ki", 0.0f, 5.0f, 0.05f},
       {"deadband", "ESS Deadband", "ess/deadband", "set/deadband", 0.0f, 500.0f, 5.0f},
       {"min_delta", "ESS Min Delta", "ess/min_delta", "set/min_delta", 0.0f, 500.0f, 5.0f},
+      {"hold_min", "ESS Hold Min", "ess/hold_min", "set/hold_min", 1.0f, float(MAX_POWER_W), 5.0f},
       {"soc_protect_low", "ESS SOC Protect Low", "ess/soc_protect/low", "set/soc_protect_low", 1.0f, 100.0f, 1.0f},
       {"soc_protect_hyst", "ESS SOC Protect Hysteresis", "ess/soc_protect/hyst", "set/soc_protect_hyst", 0.0f, 30.0f, 1.0f},
+#if DUAL_BATT_ENABLE
+      {"dual_batt_empty", "Battery Empty SOC", "battery/empty", "set/dual_batt_empty", 0.0f, 100.0f, 1.0f},
+      {"dual_batt_full", "Battery Full SOC", "battery/full", "set/dual_batt_full", 0.0f, 100.0f, 1.0f},
+#endif
   };
   for (const auto& n : numbers) {
     JsonDocument doc;
@@ -514,6 +916,51 @@ static void publishHaDiscovery() {
     }
   }
 
+#if DUAL_BATT_ENABLE
+  // Dual-battery auto enable
+  {
+    JsonDocument doc;
+    doc["name"] = "Dual Battery Auto";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_dual_batt", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = String(DEVICE_NAME) + "/battery/dual_enabled";
+    doc["command_topic"] = String(DEVICE_NAME) + "/set/dual_batt";
+    doc["payload_on"] = "true";
+    doc["payload_off"] = "false";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("switch", "dual_batt", payload);
+  }
+
+  // Force bank select: Auto / Battery A / Battery B
+  {
+    JsonDocument doc;
+    doc["name"] = "Battery Bank";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_battery_bank", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = String(DEVICE_NAME) + "/battery/force_select";
+    doc["command_topic"] = String(DEVICE_NAME) + "/set/battery";
+    doc["options"][0] = "Auto";
+    doc["options"][1] = "Battery A";
+    doc["options"][2] = "Battery B";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("select", "battery_bank", payload);
+  }
+#endif
+
   haDiscoverySent = true;
   Log.println("[ha] MQTT discovery published");
 }
@@ -521,6 +968,11 @@ static void publishHaDiscovery() {
 
 static void applyEss(float gridPowerW) {
   lastGridPowerW = gridPowerW;
+#if DUAL_BATT_ENABLE
+  if (dualBattBusy()) {
+    return; // bank switch owns Sofar commands
+  }
+#endif
   updateEssSocProtect();
 
   // PI on grid residual: drive P → 0.
@@ -542,7 +994,7 @@ static void applyEss(float gridPowerW) {
   const float e = gridPowerW;
   const float maxW = float(MAX_POWER_W);
   const bool chargeOnly = essEffectiveChargeOnly();
-  // Charge-only: allow charge (−) and standby (0), never discharge (+).
+  // Charge-only: allow charge (−) and hold, never discharge (+).
   const float uMax = chargeOnly ? 0.0f : maxW;
   const float uMin = -maxW;
 
@@ -574,7 +1026,7 @@ static void applyEss(float gridPowerW) {
   } else if (u < -essDeadbandW) {
     targetW = int16_t(u);
   } else if (fabsf(e) < essDeadbandW) {
-    // Flat grid and small command → idle; bleed I so we don't stick forever.
+    // Flat grid and small command → hold; bleed I so we don't stick forever.
     targetW = 0;
     essIntegral *= 0.9f;
     if (fabsf(essIntegral) < 1.0f) {
@@ -590,6 +1042,18 @@ static void applyEss(float gridPowerW) {
     targetW = 0;
   }
 
+  // Near-zero: hold min charge/discharge instead of standby (Sofar relay chatter).
+  if (targetW == 0) {
+    const int16_t hold = int16_t(essHoldMinW);
+    if (chargeOnly || lastCmdW < 0 || sofarLastMode() == SofarMode::Charge) {
+      targetW = -hold;
+    } else if (lastCmdW > 0 || sofarLastMode() == SofarMode::Discharge) {
+      targetW = hold;
+    } else {
+      targetW = -hold; // default: charge hold
+    }
+  }
+
   const uint32_t now = millis();
   const bool changed = fabsf(float(targetW) - float(lastCmdW)) >= essMinDeltaW;
   const bool refresh = (now - lastCmdMs) >= ESS_REFRESH_MS;
@@ -600,10 +1064,8 @@ static void applyEss(float gridPowerW) {
   bool ok = false;
   if (targetW > 0) {
     ok = sofarDischarge(uint16_t(targetW));
-  } else if (targetW < 0) {
-    ok = sofarCharge(uint16_t(-targetW));
   } else {
-    ok = sofarStandby();
+    ok = sofarCharge(uint16_t(-targetW));
   }
 
   if (ok) {
@@ -637,8 +1099,21 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 
   const String t(topic);
-  const String cmd = t.substring(t.lastIndexOf('/') + 1);
   Log.printf("[mqtt] %s = %s\n", topic, msg.c_str());
+
+#if DUAL_BATT_ENABLE
+  if (t == String(DUAL_BATT_SELECTOR_TOPIC) + "/selected") {
+    dualBattOnSelected(msg);
+    return;
+  }
+#endif
+
+  // Only handle sofaress/set/* below
+  if (!t.startsWith(String(DEVICE_NAME) + "/set/")) {
+    return;
+  }
+
+  const String cmd = t.substring(t.lastIndexOf('/') + 1);
 
   if (cmd == "ess") {
     // true / on / 1 → enable ESS (leave charge_only as-is)
@@ -757,6 +1232,18 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
+  if (cmd == "hold_min" || cmd == "hold_min_w") {
+    const int v = msg.toInt();
+    if (v >= 1 && v <= int(MAX_POWER_W)) {
+      essHoldMinW = uint16_t(v);
+      Log.printf("[ess] hold_min=%uW\n", essHoldMinW);
+      publishEssParams();
+    } else {
+      Log.println("[ess] hold_min out of range");
+    }
+    return;
+  }
+
   if (cmd == "reset_i" || cmd == "reset_integral") {
     resetEssIntegral();
     Log.println("[ess] integral reset");
@@ -775,6 +1262,58 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
     return;
   }
+
+#if DUAL_BATT_ENABLE
+  if (cmd == "dual_batt" || cmd == "dual_batt_enabled") {
+    dualBattEnabled = (msg != "false" && msg != "0" && msg != "off");
+    Log.printf("[dual] enabled=%d\n", int(dualBattEnabled));
+    publishDualBatt();
+    return;
+  }
+
+  if (cmd == "dual_batt_empty" || cmd == "battery_empty") {
+    const int v = msg.toInt();
+    if (v >= 0 && v <= 100) {
+      dualBattEmptySoc = uint8_t(v);
+      Log.printf("[dual] empty=%u\n", dualBattEmptySoc);
+      publishDualBatt();
+    } else {
+      Log.println("[dual] empty out of range (0..100)");
+    }
+    return;
+  }
+
+  if (cmd == "dual_batt_full" || cmd == "battery_full") {
+    const int v = msg.toInt();
+    if (v >= 0 && v <= 100) {
+      dualBattFullSoc = uint8_t(v);
+      Log.printf("[dual] full=%u\n", dualBattFullSoc);
+      publishDualBatt();
+    } else {
+      Log.println("[dual] full out of range (0..100)");
+    }
+    return;
+  }
+
+  if (cmd == "battery" || cmd == "battery_bank" || cmd == "force_battery") {
+    const uint8_t bank = dualBattParseBank(msg, true);
+    if (bank == 255) {
+      Log.println("[dual] battery payload invalid (A/B/auto)");
+      return;
+    }
+    dualBattForce = bank; // 0=auto
+    publishDualBatt();
+    if (bank == 0) {
+      Log.println("[dual] force cleared — auto policy");
+    } else {
+      Log.printf("[dual] force %s\n", dualBattLabel(bank));
+      if (bank != dualBattActive) {
+        dualBattBeginSwitch(bank); // force ignores cooldown
+      }
+    }
+    return;
+  }
+#endif
 
   // Manual Sofar2mqtt-compatible overrides disable ESS until re-enabled
   const int value = msg.toInt();
@@ -830,9 +1369,15 @@ static void ensureMqtt() {
   Log.println("[mqtt] connected");
   mqtt.publish(willTopic.c_str(), "online", true);
   mqtt.subscribe((String(DEVICE_NAME) + "/set/#").c_str());
+#if DUAL_BATT_ENABLE
+  mqtt.subscribe((String(DUAL_BATT_SELECTOR_TOPIC) + "/selected").c_str());
+#endif
   mqttPublish("ess/enabled", essEnabled ? "true" : "false", true);
   publishEssParams();
   publishChargeTargetSoc();
+#if DUAL_BATT_ENABLE
+  publishDualBatt();
+#endif
 #if HA_MQTT_DISCOVERY
   haDiscoverySent = false;
   publishHaDiscovery();
@@ -938,12 +1483,41 @@ static void publishState() {
   json += String(essDeadbandW, 1);
   json += ",\"ess_min_delta_w\":";
   json += String(essMinDeltaW, 1);
+  json += ",\"ess_hold_min_w\":";
+  json += String(essHoldMinW);
   json += ",\"ess_integral\":";
   json += String(essIntegral, 1);
   json += ",\"sofar_mode\":\"";
   json += modeName(sofarLastMode());
   json += "\",\"charge_target_soc\":";
   json += String(chargeTargetSoc);
+#if DUAL_BATT_ENABLE
+  json += ",\"battery_active\":\"";
+  json += dualBattLabel(dualBattActive);
+  json += "\",\"battery_force\":\"";
+  json += dualBattForceLabel();
+  json += "\",\"battery_dual_state\":\"";
+  json += dualBattStateName(dualBattState);
+  json += "\",\"battery_dual_enabled\":";
+  json += dualBattEnabled ? "true" : "false";
+  json += ",\"battery_empty_soc\":";
+  json += String(dualBattEmptySoc);
+  json += ",\"battery_full_soc\":";
+  json += String(dualBattFullSoc);
+  json += ",\"battery_a_soc\":";
+  json += dualBattSocAValid ? String(dualBattSocA) : String("null");
+  json += ",\"battery_b_soc\":";
+  json += dualBattSocBValid ? String(dualBattSocB) : String("null");
+  json += ",\"battery_combined_soc\":";
+  {
+    const float combinedSoc = dualBattCombinedSoc();
+    json += isnan(combinedSoc) ? String("null") : String(combinedSoc, 1);
+  }
+  json += ",\"battery_a_kwh\":";
+  json += String(DUAL_BATT_A_KWH, 1);
+  json += ",\"battery_b_kwh\":";
+  json += String(DUAL_BATT_B_KWH, 1);
+#endif
   json += ",\"sofar_ok\":";
   json += lastSofarOk ? "true" : "false";
   json += ",\"sofar_last_error\":\"";
@@ -1182,12 +1756,26 @@ void loop() {
       digitalWrite(STATUS_LED_PIN, LOW);
     }
 
+#if DUAL_BATT_ENABLE
+    dualBattTick();
+#endif
+
     // One Sofar register per ESS cycle (run → grid → batt → soc → …). Keeps
     // MQTT state fresh without a 4-read stall every 10 s.
-    if (sofarPollStatusField(lastSofar)) {
-      lastSofarOk = true;
-      checkChargeTargetSoc();
+#if DUAL_BATT_ENABLE
+    // During SOC sync the state machine does dedicated SOC polls.
+    if (dualBattState != DualBattState::SyncSoc) {
+#endif
+      if (sofarPollStatusField(lastSofar)) {
+        lastSofarOk = true;
+        checkChargeTargetSoc();
+#if DUAL_BATT_ENABLE
+        dualBattUpdateCacheFromLive();
+#endif
+      }
+#if DUAL_BATT_ENABLE
     }
+#endif
   }
 
   if (now - lastMqttStateMs >= MQTT_STATE_INTERVAL_MS) {

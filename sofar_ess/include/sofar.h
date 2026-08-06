@@ -45,6 +45,12 @@ bool sofarCharge(uint16_t watts);
 bool sofarDischarge(uint16_t watts);
 // Read one status register into cache (round-robin). Non-blocking aside from one Modbus txn.
 bool sofarPollStatusField(SofarStatus& cache);
+// Clear live SOC validity and jump-confirm pending (call after battery bank switch).
+void sofarInvalidateSoc(SofarStatus& cache);
+// When true, sofarPollStatusField prefers SOC reads until a SOC is accepted.
+void sofarPreferSocPoll(bool enable);
+// One dedicated SOC Modbus read + acceptSoc (for post-switch sync).
+bool sofarPollSocNow(SofarStatus& cache);
 SofarMode sofarLastMode();
 uint16_t sofarLastSetpointW();
 
