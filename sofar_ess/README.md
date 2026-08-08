@@ -8,7 +8,7 @@ Every ~500 ms:
 
 1. Sample **load2 active power** from MycilaJSY
 2. If ESS enabled, run a **PI** on grid residual `e = P` (`u = Kp·e + Ki·∫e`), then charge/discharge from `u`
-3. Publish live ESS MQTT topics; `…/state` (~5 s) is **cache-only**. Sofar registers are refreshed one Modbus txn per ESS cycle (run / grid / batt / SOC / fault block / alert / battery-fault).
+3. Publish live ESS MQTT topics; `…/state` (~5 s) is **cache-only**. Sofar registers are refreshed **one Modbus txn per ESS cycle** in round-robin (run / grid / batt / SOC / fault / alert / battFault / **PV strings** / **PV today**).
 
 Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator freezes in the deadband, uses measured `dt`, and has anti-windup at ±MAX.
 
@@ -20,12 +20,14 @@ Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator fr
 
 **Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). Force a bank via `set/battery`. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle → invalidate SOC → re-poll until confirmed.
 
-Inverter must be in **Passive Mode** (same requirement as Sofar2mqtt).
-
 The firmware publishes a capacity-weighted combined SOC:
 `(A_SOC × 10 kWh + B_SOC × 5 kWh) / 15 kWh`. It is unavailable until both
 banks have been observed. `smart_energy.yaml` uses the combined value and falls
 back to the connected bank SOC during initial discovery.
+
+**Sofar PV strings (hybrid):** Modbus block `0x0250–0x0255` (PV1/PV2 V×0.1, I×0.01 A, P×0.01 kW) and today generation `0x0218` (×0.01 kWh). Polled as low-priority round-robin phases (still one status txn per ESS tick). Sofar PV Total = PV1+PV2 watts. Per-string daily energy is **not** in this register map. HA also builds site totals from Hoymiles 1600 + Hoymiles 800 + Sofar PV.
+
+Inverter must be in **Passive Mode** (same requirement as Sofar2mqtt).
 
 ## Wiring (ESP32-C3 SuperMini)
 
@@ -189,6 +191,10 @@ mosquitto_pub -t sofaress/set/battery -m Auto
 | `battery_a_soc` / `battery_b_soc` | Per-bank last-known SOC (`null` if never seen) |
 | `battery_combined_soc` | Capacity-weighted combined SOC (`null` until both banks are known) |
 | `battery_a_kwh` / `battery_b_kwh` | Configured capacities (10 / 5) |
+| `pv1_power_w` / `pv1_voltage_v` / `pv1_current_a` | Sofar PV1 string (null until first PV poll) |
+| `pv2_power_w` / `pv2_voltage_v` / `pv2_current_a` | Sofar PV2 string |
+| `pv_total_w` | Sofar PV1 + PV2 power (W) |
+| `pv_today_kwh` | Sofar inverter today generation (`0x0218`) |
 | `sofar_ok` | `true` once any Sofar Modbus read succeeds; `false` = RS485 never OK |
 | `sofar_last_error` | Last Modbus fail reason (`no-rx`, `timeout`, `crc`, `exception`, …) |
 | `run_state` | Sofar run-state register (0–7) when RS485 OK |
@@ -217,12 +223,14 @@ mosquitto_pub -t sofaress/set/charge_only -m true
 
 With MQTT discovery enabled (`HA_MQTT_DISCOVERY=1`, default), device **Sofar ESS** appears when MQTT connects.
 
-- Sensors: grid / battery power, ESS command, SOC (live + A/B + combined), active bank, dual state, energy import/export, Sofar mode, run state / name, fault / alert / battery-fault messages, Sofar last error  
+- Sensors: grid / battery power, ESS command, SOC (live + A/B + combined), Sofar PV1/PV2 (W/V/A) + PV total + PV today, active bank, dual state, energy import/export, Sofar mode, run state / name, fault / alert / battery-fault messages, Sofar last error  
 - Binary sensors: Sofar OK (RS485), Sofar fault active, ESS SOC protect active  
 - Switch: ESS enabled, ESS charge only, ESS SOC protect, Dual Battery Auto  
 - Select: Battery Bank (`Auto` / `Battery A` / `Battery B`)  
 - Numbers: ESS Kp, ESS Ki, Deadband, Min Delta, Hold Min, SOC protect low/hyst, Battery empty/full SOC  
 - Buttons: Standby, Auto, Reset Integral  
+
+HA package templates (in `smart_energy.yaml`): `sensor.site_solar_total_power` (Hoymiles 1600 + 800 + Sofar PV) and `sensor.site_solar_today_kwh`.
 
 If **Sofar OK** stays off, check `sofar_last_error` (`no-rx` = wiring/DE/slave ID; `crc` = noise/baud; `exception` = bad register). Inverter **fault** run-state is separate — use **Sofar Fault** / **fault_raw** from the PDF fault-message registers.
 

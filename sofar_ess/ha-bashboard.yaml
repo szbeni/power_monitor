@@ -406,10 +406,22 @@ views:
             name: Grid
           - type: entity
             entity: sensor.opendtu_60d84c_ac_power
-            name: Solar
+            name: Solar 1600
           - type: entity
             entity: sensor.home_pv_power
-            name: Solar2
+            name: Solar 800
+          - type: entity
+            entity: sensor.sofar_ess_pv1_power
+            name: Sofar PV1
+          - type: entity
+            entity: sensor.sofar_ess_pv2_power
+            name: Sofar PV2
+          - type: entity
+            entity: sensor.sofar_ess_pv_total
+            name: Sofar PV
+          - type: entity
+            entity: sensor.site_solar_total_power
+            name: Solar Total
           - type: entity
             entity: sensor.load_power
             name: Load
@@ -436,8 +448,14 @@ views:
         title: Power (1 h)
         hours_to_show: 1
         entities:
+          - entity: sensor.site_solar_total_power
+            name: Solar Total
           - entity: sensor.opendtu_60d84c_ac_power
-            name: Solar
+            name: Solar 1600
+          - entity: sensor.home_pv_power
+            name: Solar 800
+          - entity: sensor.sofar_ess_pv_total
+            name: Sofar PV
           - entity: sensor.sofar_ess_grid_power
             name: Grid
           - entity: sensor.load_power
@@ -454,6 +472,28 @@ views:
             name: Battery A (10 kWh)
           - entity: sensor.sofar_ess_battery_b_soc
             name: Battery B (5 kWh)
+      - type: entities
+        title: Sofar PV
+        show_header_toggle: false
+        entities:
+          - entity: sensor.sofar_ess_pv_total
+            name: Sofar PV total
+          - entity: sensor.sofar_ess_pv_today
+            name: Sofar PV today
+          - type: divider
+          - entity: sensor.sofar_ess_pv1_power
+            name: PV1 power
+          - entity: sensor.sofar_ess_pv1_voltage
+            name: PV1 voltage
+          - entity: sensor.sofar_ess_pv1_current
+            name: PV1 current
+          - type: divider
+          - entity: sensor.sofar_ess_pv2_power
+            name: PV2 power
+          - entity: sensor.sofar_ess_pv2_voltage
+            name: PV2 voltage
+          - entity: sensor.sofar_ess_pv2_current
+            name: PV2 current
       - type: entities
         title: Dual battery
         show_header_toggle: false
@@ -562,10 +602,14 @@ views:
         title: Today
         show_header_toggle: false
         entities:
+          - entity: sensor.site_solar_today_kwh
+            name: Site solar today
           - entity: sensor.opendtu_60d84c_yield_day
-            name: Solar yield
+            name: Solar 1600 yield
           - entity: sensor.home_today_s_energy
-            name: Solar 2 yield
+            name: Solar 800 yield
+          - entity: sensor.sofar_ess_pv_today
+            name: Sofar PV yield
           - entity: sensor.grid_energy_imported_daily
             name: Grid import
           - entity: sensor.grid_energy_exported_daily
@@ -573,17 +617,25 @@ views:
           - entity: sensor.hms_1600_4t_temperature
             name: Inverter temp
           - entity: sensor.opendtu_60d84c_yield_total
-            name: Solar lifetime
+            name: Solar 1600 lifetime
       - type: history-graph
         title: Power (24 h)
         hours_to_show: 24
         entities:
+          - entity: sensor.site_solar_total_power
+            name: Solar Total
           - entity: sensor.opendtu_60d84c_ac_power
-            name: Solar
+            name: Solar 1600
+          - entity: sensor.home_pv_power
+            name: Solar 800
+          - entity: sensor.sofar_ess_pv_total
+            name: Sofar PV
           - entity: sensor.sofar_ess_grid_power
             name: Grid
           - entity: sensor.load_power
             name: Load
+          - entity: sensor.sofar_ess_battery_power
+            name: Battery
       - type: statistics-graph
         title: Hourly averages (24 h)
         days_to_show: 1
@@ -592,8 +644,14 @@ views:
         stat_types:
           - mean
         entities:
+          - entity: sensor.site_solar_total_power
+            name: Solar Total
           - entity: sensor.opendtu_60d84c_ac_power
-            name: Solar
+            name: Solar 1600
+          - entity: sensor.home_pv_power
+            name: Solar 800
+          - entity: sensor.sofar_ess_pv_total
+            name: Sofar PV
           - entity: sensor.sofar_ess_grid_power
             name: Grid
           - entity: sensor.load_power

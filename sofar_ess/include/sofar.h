@@ -33,6 +33,18 @@ struct SofarStatus {
   uint16_t battFault[5] = {};
   bool battFaultValid = false;
 
+  // PV strings (0x0250–0x0255) + today generation (0x0218). Low-priority poll.
+  float pv1VoltageV = 0.0f;
+  float pv1CurrentA = 0.0f;
+  float pv1PowerW = 0.0f;
+  float pv2VoltageV = 0.0f;
+  float pv2CurrentA = 0.0f;
+  float pv2PowerW = 0.0f;
+  float pvTotalW = 0.0f; // PV1 + PV2
+  bool pvValid = false;
+  float pvTodayKwh = 0.0f;
+  bool pvTodayValid = false;
+
   // Last Modbus failure reason (timeout, crc, exception, …).
   char lastError[24] = "";
 };

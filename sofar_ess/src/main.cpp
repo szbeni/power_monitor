@@ -615,6 +615,14 @@ static const HaSensor kHaSensors[] = {
     {"battery_combined_soc", "Battery Combined SOC", "{{ value_json.battery_combined_soc }}", "%", "battery", "measurement"},
     {"battery_active", "Battery Active", "{{ value_json.battery_active }}", nullptr, nullptr, nullptr},
     {"battery_dual_state", "Battery Dual State", "{{ value_json.battery_dual_state }}", nullptr, nullptr, nullptr},
+    {"pv1_power", "PV1 Power", "{{ value_json.pv1_power_w }}", "W", "power", "measurement"},
+    {"pv1_voltage", "PV1 Voltage", "{{ value_json.pv1_voltage_v }}", "V", "voltage", "measurement"},
+    {"pv1_current", "PV1 Current", "{{ value_json.pv1_current_a }}", "A", "current", "measurement"},
+    {"pv2_power", "PV2 Power", "{{ value_json.pv2_power_w }}", "W", "power", "measurement"},
+    {"pv2_voltage", "PV2 Voltage", "{{ value_json.pv2_voltage_v }}", "V", "voltage", "measurement"},
+    {"pv2_current", "PV2 Current", "{{ value_json.pv2_current_a }}", "A", "current", "measurement"},
+    {"pv_total", "Sofar PV Total", "{{ value_json.pv_total_w }}", "W", "power", "measurement"},
+    {"pv_today", "Sofar PV Today", "{{ value_json.pv_today_kwh }}", "kWh", "energy", "total_increasing"},
     {"energy_import", "Energy Import", "{{ value_json.energy_import_wh }}", "Wh", "energy", "total_increasing"},
     {"energy_export", "Energy Export", "{{ value_json.energy_export_wh }}", "Wh", "energy", "total_increasing"},
     {"sofar_mode", "Sofar Mode", "{{ value_json.sofar_mode }}", nullptr, nullptr, nullptr},
@@ -1555,6 +1563,28 @@ static void publishState() {
     json += ",\"sofar_grid_raw\":";
     json += String(lastSofar.gridPowerRaw);
   }
+  if (lastSofar.pvValid) {
+    json += ",\"pv1_voltage_v\":";
+    json += String(lastSofar.pv1VoltageV, 1);
+    json += ",\"pv1_current_a\":";
+    json += String(lastSofar.pv1CurrentA, 2);
+    json += ",\"pv1_power_w\":";
+    json += String(lastSofar.pv1PowerW, 0);
+    json += ",\"pv2_voltage_v\":";
+    json += String(lastSofar.pv2VoltageV, 1);
+    json += ",\"pv2_current_a\":";
+    json += String(lastSofar.pv2CurrentA, 2);
+    json += ",\"pv2_power_w\":";
+    json += String(lastSofar.pv2PowerW, 0);
+    json += ",\"pv_total_w\":";
+    json += String(lastSofar.pvTotalW, 0);
+  } else {
+    json += ",\"pv1_voltage_v\":null,\"pv1_current_a\":null,\"pv1_power_w\":null";
+    json += ",\"pv2_voltage_v\":null,\"pv2_current_a\":null,\"pv2_power_w\":null";
+    json += ",\"pv_total_w\":null";
+  }
+  json += ",\"pv_today_kwh\":";
+  json += lastSofar.pvTodayValid ? String(lastSofar.pvTodayKwh, 2) : String("null");
   if (lastSofar.faultValid) {
     char hex[48];
     snprintf(hex,

@@ -21,8 +21,10 @@ constexpr uint16_t REG_FAULT1 = 0x0201;   // fault bytes 0–1 … through REG_F
 constexpr uint16_t REG_BATTW = 0x020d;
 constexpr uint16_t REG_BATTSOC = 0x0210;
 constexpr uint16_t REG_GRIDW = 0x0212;
+constexpr uint16_t REG_PVDAY = 0x0218;    // today generation ×0.01 kWh
 constexpr uint16_t REG_ALERT = 0x022b;
 constexpr uint16_t REG_BATTFAULT1 = 0x023d; // batt fault bytes 0–1 … +4
+constexpr uint16_t REG_PV1_V = 0x0250;    // PV1/2 block: V×0.1, I×0.01 A, P×0.01 kW
 
 constexpr uint32_t kListenTimeoutMs = 400;
 // A reply that is still in flight when we transmit would be read as the answer
@@ -549,7 +551,8 @@ bool sofarPollSocNow(SofarStatus& cache) {
 
 bool sofarPollStatusField(SofarStatus& cache) {
   // One Modbus txn per call so ESS timing stays predictable.
-  // Phases: run → grid → batt → soc → fault[5] → alert → battFault[5].
+  // Phases: run → grid → batt → soc → fault[5] → alert → battFault[5]
+  //         → pv strings[6] → pv today. PV is low-priority telemetry.
   static uint8_t phase = 0;
   static uint8_t failStreak = 0;
   uint16_t v = 0;
@@ -560,7 +563,7 @@ bool sofarPollStatusField(SofarStatus& cache) {
     phase = 3;
   }
 
-  switch (phase % 7) {
+  switch (phase % 9) {
     case 0:
       ok = readReg(REG_RUNSTATE, v);
       if (ok) {
@@ -624,7 +627,7 @@ bool sofarPollStatusField(SofarStatus& cache) {
         }
       }
       break;
-    default:
+    case 6:
       ok = readRegs(REG_BATTFAULT1, 5, cache.battFault);
       if (ok) {
         cache.battFaultValid = true;
@@ -640,6 +643,29 @@ bool sofarPollStatusField(SofarStatus& cache) {
                      cache.battFault[3],
                      cache.battFault[4]);
         }
+      }
+      break;
+    case 7: {
+      // PV1/PV2 V/I/P as one 6-register block (hybrid ME3000SP map).
+      uint16_t pv[6] = {};
+      ok = readRegs(REG_PV1_V, 6, pv);
+      if (ok) {
+        cache.pv1VoltageV = float(int16_t(pv[0])) * 0.1f;
+        cache.pv1CurrentA = float(int16_t(pv[1])) * 0.01f;
+        cache.pv1PowerW = float(int16_t(pv[2])) * 0.01f * 1000.0f;
+        cache.pv2VoltageV = float(int16_t(pv[3])) * 0.1f;
+        cache.pv2CurrentA = float(int16_t(pv[4])) * 0.01f;
+        cache.pv2PowerW = float(int16_t(pv[5])) * 0.01f * 1000.0f;
+        cache.pvTotalW = cache.pv1PowerW + cache.pv2PowerW;
+        cache.pvValid = true;
+      }
+      break;
+    }
+    default:
+      ok = readReg(REG_PVDAY, v);
+      if (ok) {
+        cache.pvTodayKwh = float(v) * 0.01f;
+        cache.pvTodayValid = true;
       }
       break;
   }

@@ -179,6 +179,44 @@ template:
             {{ 'combined' if combined not in ['unknown', 'unavailable', 'none', '']
                else 'connected_fallback' }}
 
+      - name: Site Solar Total Power
+        unique_id: site_solar_total_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:solar-power
+        state: >-
+          {% set s1600 = states('sensor.opendtu_60d84c_ac_power') %}
+          {% set s800 = states('sensor.home_pv_power') %}
+          {% set sofar = states('sensor.sofar_ess_pv_total') %}
+          {% set w1600 = s1600 | float(0) if s1600 not in ['unknown', 'unavailable', 'none', ''] else 0 %}
+          {% set w800 = s800 | float(0) if s800 not in ['unknown', 'unavailable', 'none', ''] else 0 %}
+          {% set wpv = sofar | float(0) if sofar not in ['unknown', 'unavailable', 'none', ''] else 0 %}
+          {{ (w1600 + w800 + wpv) | round(0) }}
+        attributes:
+          hoymiles_1600_w: "{{ states('sensor.opendtu_60d84c_ac_power') }}"
+          hoymiles_800_w: "{{ states('sensor.home_pv_power') }}"
+          sofar_pv_w: "{{ states('sensor.sofar_ess_pv_total') }}"
+
+      - name: Site Solar Today
+        unique_id: site_solar_today_kwh
+        unit_of_measurement: kWh
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:solar-power-variant
+        state: >-
+          {% set y1600 = states('sensor.opendtu_60d84c_yield_day') %}
+          {% set y800 = states('sensor.home_today_s_energy') %}
+          {% set ysofar = states('sensor.sofar_ess_pv_today') %}
+          {% set k1600 = y1600 | float(0) if y1600 not in ['unknown', 'unavailable', 'none', ''] else 0 %}
+          {% set k800 = y800 | float(0) if y800 not in ['unknown', 'unavailable', 'none', ''] else 0 %}
+          {% set ksofar = ysofar | float(0) if ysofar not in ['unknown', 'unavailable', 'none', ''] else 0 %}
+          {{ (k1600 + k800 + ksofar) | round(2) }}
+        attributes:
+          hoymiles_1600_kwh: "{{ states('sensor.opendtu_60d84c_yield_day') }}"
+          hoymiles_800_kwh: "{{ states('sensor.home_today_s_energy') }}"
+          sofar_pv_kwh: "{{ states('sensor.sofar_ess_pv_today') }}"
+
       - name: Smart Charge Target SOC
         unique_id: smart_charge_target_soc
         unit_of_measurement: "%"
