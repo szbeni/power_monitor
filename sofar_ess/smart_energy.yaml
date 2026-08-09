@@ -188,7 +188,7 @@ template:
         state: >-
           {% set s1600 = states('sensor.opendtu_60d84c_ac_power') %}
           {% set s800 = states('sensor.home_pv_power') %}
-          {% set sofar = states('sensor.sofar_ess_pv_total') %}
+          {% set sofar = states('sensor.sofar_ess_sofar_pv_total') %}
           {% set w1600 = s1600 | float(0) if s1600 not in ['unknown', 'unavailable', 'none', ''] else 0 %}
           {% set w800 = s800 | float(0) if s800 not in ['unknown', 'unavailable', 'none', ''] else 0 %}
           {% set wpv = sofar | float(0) if sofar not in ['unknown', 'unavailable', 'none', ''] else 0 %}
@@ -199,15 +199,15 @@ template:
           sofar_pv_w: "{{ states('sensor.sofar_ess_pv_total') }}"
 
       - name: Site Solar Today
-        unique_id: site_solar_today_kwh
-        unit_of_measurement: kWh
+        unique_id: site_solar_today_wh
+        unit_of_measurement: Wh
         device_class: energy
         state_class: total_increasing
         icon: mdi:solar-power-variant
         state: >-
           {% set y1600 = states('sensor.opendtu_60d84c_yield_day') %}
           {% set y800 = states('sensor.home_today_s_energy') %}
-          {% set ysofar = states('sensor.sofar_ess_pv_today') %}
+          {% set ysofar = states('sensor.sofar_ess_sofar_pv_today') %}
           {% set k1600 = y1600 | float(0) if y1600 not in ['unknown', 'unavailable', 'none', ''] else 0 %}
           {% set k800 = y800 | float(0) if y800 not in ['unknown', 'unavailable', 'none', ''] else 0 %}
           {% set ksofar = ysofar | float(0) if ysofar not in ['unknown', 'unavailable', 'none', ''] else 0 %}
