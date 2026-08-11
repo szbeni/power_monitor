@@ -18,7 +18,17 @@ Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator fr
 
 **SOC protect** (daytime ESS only, separate from overnight smart charging): when bidirectional ESS is running, SOC below the **low threshold** forces charge-only (no discharge); bidirectional resumes once SOC reaches **low + hysteresis** (default 15% / +5%). Tunable via MQTT or HA.
 
-**Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). Force a bank via `set/battery`. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle → invalidate SOC → re-poll until confirmed.
+**Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). Force a bank via `set/battery`. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle (`DUAL_BATT_SETTLE_MS`, 15 s) → invalidate SOC → re-poll until confirmed.
+
+**SOC validation** (why a bank switch no longer reports a bogus SOC): a mis-paired Modbus reply is indistinguishable from a real register value, so SOC is filtered three ways.
+
+| Guard | Effect |
+| ----- | ------ |
+| Block read `0x020D–0x0210` | SOC is read together with battery power (8 data bytes). A stale single-register reply has 2 bytes and is rejected by framing, not by heuristics. Falls back to a single read if the inverter refuses the block. |
+| Multi-sample confirm | Suspicious values must repeat `SOC_CONFIRM_SAMPLES` (2) times agreeing within `SOC_CONFIRM_TOLERANCE` (±2%), so a BMS tick during settling no longer blocks confirmation. |
+| Cross-check vs bank cache | After a switch, the reading is compared with that bank's last-known SOC. Deviation beyond `SOC_EXPECT_DEVIATION_PCT` (15%) requires `SOC_CONFIRM_SAMPLES_STRICT` (4) agreeing samples. |
+
+Steady-state steps larger than `SOC_JUMP_PCT` (20%) also need confirmation. Rejected/pending reads are counted in `soc_rejects` (state JSON + HA sensor **SOC Rejects**) — a rising count during switches means the filter is catching bad frames. All thresholds are `config.h` overrides.
 
 The firmware publishes a capacity-weighted combined SOC:
 `(A_SOC × 10 kWh + B_SOC × 5 kWh) / 15 kWh`. It is unavailable until both

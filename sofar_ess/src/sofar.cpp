@@ -477,41 +477,102 @@ bool sofarDischarge(uint16_t watts) {
   return ok;
 }
 
-// SoC must be 0..100. A large step is more likely a mis-paired reply than a
-// real jump, so make it prove itself on the next poll before we believe it.
+// SoC must be 0..100. A mis-paired reply carries no register address, so a
+// suspicious value has to repeat before we believe it.
 static uint16_t socPending_ = 0;
-static bool socHavePending_ = false;
+static uint8_t socPendingCount_ = 0;
 static bool preferSocPoll_ = false;
 static bool requireSocConfirm_ = false;
+static bool socExpectValid_ = false;
+static uint8_t socExpect_ = 0;
+static bool socBlockRead_ = true;
+
+static int absDiff(int a, int b) {
+  return (a > b) ? (a - b) : (b - a);
+}
+
+// Read SOC as part of the 0x020D…0x0210 block. A stale single-register reply
+// carries 2 data bytes and cannot satisfy an 8-byte read, so mis-pairing is
+// rejected by framing rather than by guesswork. Falls back to a single read if
+// the inverter refuses the block.
+static bool readSocReg(uint16_t& soc, uint16_t& battWRaw, bool& battWValid) {
+  battWValid = false;
+  if (socBlockRead_) {
+    uint16_t blk[4] = {};
+    if (readRegs(REG_BATTW, 4, blk)) {
+      battWRaw = blk[0];
+      battWValid = true;
+      soc = blk[3];
+      return true;
+    }
+    if (strcmp(listenFailWhy_, "exception") == 0 || strcmp(listenFailWhy_, "len") == 0) {
+      Log.println("[sofar] SOC block read unsupported — using single register");
+      socBlockRead_ = false;
+    } else {
+      return false; // transient — keep using the block read
+    }
+  }
+  return readReg(REG_BATTSOC, soc);
+}
 
 static bool acceptSoc(SofarStatus& cache, uint16_t v) {
   if (v > 100) {
     Log.printf("[sofar] SoC %u out of range — ignored\n", v);
-    socHavePending_ = false;
+    socPendingCount_ = 0;
+    cache.socRejects++;
     return false;
   }
 
-  // After a bank switch, always require two matching reads before trusting SOC.
+  // Decide how much proof this reading needs.
+  uint8_t need = 1;
+  const char* why = "";
   if (requireSocConfirm_) {
-    if (!(socHavePending_ && socPending_ == v)) {
-      Log.printf("[sofar] SoC post-switch %u — waiting for confirmation\n", v);
-      socPending_ = v;
-      socHavePending_ = true;
+    need = SOC_CONFIRM_SAMPLES;
+    why = "post-switch";
+  }
+  if (cache.socValid && absDiff(int(v), int(cache.batterySoc)) > SOC_JUMP_PCT) {
+    if (SOC_CONFIRM_SAMPLES > need) {
+      need = SOC_CONFIRM_SAMPLES;
+    }
+    why = "jump";
+  }
+  // Cross-check against what this bank last reported — the strongest signal
+  // that a post-switch reading belongs to the wrong pack or is a stale reply.
+  if (socExpectValid_ && absDiff(int(v), int(socExpect_)) > SOC_EXPECT_DEVIATION_PCT) {
+    need = SOC_CONFIRM_SAMPLES_STRICT;
+    why = "unexpected vs bank cache";
+  }
+
+  if (need > 1) {
+    if (socPendingCount_ > 0 && absDiff(int(v), int(socPending_)) <= SOC_CONFIRM_TOLERANCE) {
+      socPendingCount_++;
+    } else {
+      socPendingCount_ = 1;
+    }
+    socPending_ = v;
+    if (socPendingCount_ < need) {
+      char expect[8] = "n/a";
+      if (socExpectValid_) {
+        snprintf(expect, sizeof(expect), "%u", unsigned(socExpect_));
+      }
+      Log.printf("[sofar] SoC %u (%s, expect=%s) — confirm %u/%u\n",
+                 v,
+                 why,
+                 expect,
+                 unsigned(socPendingCount_),
+                 unsigned(need));
+      cache.socRejects++;
       return false;
     }
-    requireSocConfirm_ = false;
+    Log.printf("[sofar] SoC %u confirmed after %u samples (%s)\n",
+               v,
+               unsigned(socPendingCount_),
+               why);
   }
 
-  const int delta = int(v) - int(cache.batterySoc);
-  const bool jump = cache.socValid && (delta > 20 || delta < -20);
-  if (jump && !(socHavePending_ && socPending_ == v)) {
-    Log.printf("[sofar] SoC jump %u -> %u — waiting for confirmation\n", cache.batterySoc, v);
-    socPending_ = v;
-    socHavePending_ = true;
-    return false;
-  }
-
-  socHavePending_ = false;
+  socPendingCount_ = 0;
+  requireSocConfirm_ = false;
+  socExpectValid_ = false;
   cache.batterySoc = v;
   cache.socValid = true;
   return true;
@@ -520,10 +581,20 @@ static bool acceptSoc(SofarStatus& cache, uint16_t v) {
 void sofarInvalidateSoc(SofarStatus& cache) {
   cache.socValid = false;
   cache.batterySoc = 0;
-  socHavePending_ = false;
+  socPendingCount_ = 0;
   socPending_ = 0;
   requireSocConfirm_ = true;
   Log.println("[sofar] SoC invalidated (awaiting new bank)");
+}
+
+void sofarSetSocExpectation(bool have, uint8_t expected) {
+  socExpectValid_ = have && expected <= 100;
+  socExpect_ = socExpectValid_ ? expected : 0;
+  if (socExpectValid_) {
+    Log.printf("[sofar] SoC expectation %u%% (±%u)\n",
+               unsigned(socExpect_),
+               unsigned(SOC_EXPECT_DEVIATION_PCT));
+  }
 }
 
 void sofarPreferSocPoll(bool enable) {
@@ -535,7 +606,9 @@ bool sofarPollSocNow(SofarStatus& cache) {
     return false;
   }
   uint16_t v = 0;
-  if (!readReg(REG_BATTSOC, v)) {
+  uint16_t battW = 0;
+  bool battWValid = false;
+  if (!readSocReg(v, battW, battWValid)) {
     setLastError(cache, listenFailWhy_);
     return false;
   }
@@ -543,6 +616,10 @@ bool sofarPollSocNow(SofarStatus& cache) {
   if (!ok) {
     setLastError(cache, "soc-reject");
   } else {
+    if (battWValid) {
+      cache.batteryPowerRaw = battW;
+      cache.batteryPowerW = decodeBatteryPowerW(cache.runState, battW);
+    }
     cache.ok = true;
     setLastError(cache, "");
   }
@@ -584,17 +661,26 @@ bool sofarPollStatusField(SofarStatus& cache) {
         cache.batteryPowerW = decodeBatteryPowerW(cache.runState, cache.batteryPowerRaw);
       }
       break;
-    case 3:
-      ok = readReg(REG_BATTSOC, v);
+    case 3: {
+      uint16_t battW = 0;
+      bool battWValid = false;
+      ok = readSocReg(v, battW, battWValid);
       if (ok) {
         ok = acceptSoc(cache, v);
         if (!ok) {
           setLastError(cache, "soc-reject");
-        } else if (preferSocPoll_) {
-          preferSocPoll_ = false;
+        } else {
+          if (battWValid) {
+            cache.batteryPowerRaw = battW;
+            cache.batteryPowerW = decodeBatteryPowerW(cache.runState, battW);
+          }
+          if (preferSocPoll_) {
+            preferSocPoll_ = false;
+          }
         }
       }
       break;
+    }
     case 4:
       ok = readRegs(REG_FAULT1, 5, cache.fault);
       if (ok) {

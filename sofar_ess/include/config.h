@@ -127,8 +127,9 @@
 #ifndef DUAL_BATT_FULL_SOC
 #define DUAL_BATT_FULL_SOC 98
 #endif
+// Contactor + BMS handover time before the inverter reports the new pack.
 #ifndef DUAL_BATT_SETTLE_MS
-#define DUAL_BATT_SETTLE_MS 8000
+#define DUAL_BATT_SETTLE_MS 15000
 #endif
 #ifndef DUAL_BATT_COOLDOWN_MS
 #define DUAL_BATT_COOLDOWN_MS 60000
@@ -136,8 +137,32 @@
 #ifndef DUAL_BATT_CONFIRM_TIMEOUT_MS
 #define DUAL_BATT_CONFIRM_TIMEOUT_MS 10000
 #endif
+// Must allow several confirmation samples (one per ESS cycle) after settling.
 #ifndef DUAL_BATT_SOC_SYNC_TIMEOUT_MS
-#define DUAL_BATT_SOC_SYNC_TIMEOUT_MS 20000
+#define DUAL_BATT_SOC_SYNC_TIMEOUT_MS 30000
+#endif
+
+// SOC validation — a mis-paired Modbus reply looks like a valid register value,
+// so suspicious readings must repeat before they are believed.
+// Samples that must agree (within SOC_CONFIRM_TOLERANCE) for a suspicious value.
+#ifndef SOC_CONFIRM_SAMPLES
+#define SOC_CONFIRM_SAMPLES 2
+#endif
+// Samples required when the value contradicts what we last knew for this bank.
+#ifndef SOC_CONFIRM_SAMPLES_STRICT
+#define SOC_CONFIRM_SAMPLES_STRICT 4
+#endif
+// Two samples count as agreeing within this many % (BMS ticks while settling).
+#ifndef SOC_CONFIRM_TOLERANCE
+#define SOC_CONFIRM_TOLERANCE 2
+#endif
+// Step (%) vs the live SOC that is treated as a jump needing confirmation.
+#ifndef SOC_JUMP_PCT
+#define SOC_JUMP_PCT 20
+#endif
+// Deviation (%) from the bank's last-known SOC that triggers strict confirmation.
+#ifndef SOC_EXPECT_DEVIATION_PCT
+#define SOC_EXPECT_DEVIATION_PCT 15
 #endif
 #ifndef DUAL_BATT_SELECTOR_TOPIC
 #define DUAL_BATT_SELECTOR_TOPIC "battery_selector"

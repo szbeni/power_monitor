@@ -47,6 +47,8 @@ struct SofarStatus {
 
   // Last Modbus failure reason (timeout, crc, exception, …).
   char lastError[24] = "";
+  // SOC reads not accepted (out of range / awaiting confirmation). Diagnostic.
+  uint16_t socRejects = 0;
 };
 
 bool sofarBegin(HardwareSerial& bus);
@@ -59,6 +61,10 @@ bool sofarDischarge(uint16_t watts);
 bool sofarPollStatusField(SofarStatus& cache);
 // Clear live SOC validity and jump-confirm pending (call after battery bank switch).
 void sofarInvalidateSoc(SofarStatus& cache);
+// Cross-check hint: SOC we expect from the bank being connected (its last known
+// value). A reading far from it must confirm SOC_CONFIRM_SAMPLES_STRICT times.
+// Cleared once a SOC is accepted.
+void sofarSetSocExpectation(bool have, uint8_t expected);
 // When true, sofarPollStatusField prefers SOC reads until a SOC is accepted.
 void sofarPreferSocPoll(bool enable);
 // One dedicated SOC Modbus read + acceptSoc (for post-switch sync).

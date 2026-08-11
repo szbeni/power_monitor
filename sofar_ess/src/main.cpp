@@ -501,6 +501,13 @@ static void dualBattTick() {
     case DualBattState::Settling:
       if (now - dualBattStateMs >= DUAL_BATT_SETTLE_MS) {
         sofarInvalidateSoc(lastSofar);
+        // Cross-check the first post-switch reading against this bank's last
+        // known SOC; a contradicting value needs strict confirmation.
+        if (dualBattTarget == 2) {
+          sofarSetSocExpectation(dualBattSocBValid, dualBattSocB);
+        } else {
+          sofarSetSocExpectation(dualBattSocAValid, dualBattSocA);
+        }
         sofarPreferSocPoll(true);
         dualBattSetState(DualBattState::SyncSoc);
       }
@@ -632,6 +639,7 @@ static const HaSensor kHaSensors[] = {
     {"alert_message", "Sofar Alert", "{{ value_json.alert_message }}", nullptr, nullptr, nullptr},
     {"batt_fault_message", "Battery Fault", "{{ value_json.batt_fault_message }}", nullptr, nullptr, nullptr},
     {"sofar_last_error", "Sofar Last Error", "{{ value_json.sofar_last_error }}", nullptr, nullptr, nullptr},
+    {"soc_rejects", "SOC Rejects", "{{ value_json.soc_rejects }}", nullptr, nullptr, "total_increasing"},
 };
 
 static void haFillDevice(JsonObject device) {
@@ -1531,6 +1539,8 @@ static void publishState() {
   json += ",\"sofar_last_error\":\"";
   json += lastSofar.lastError;
   json += "\"";
+  json += ",\"soc_rejects\":";
+  json += String(lastSofar.socRejects);
 
   char faultMsg[160] = "";
   char alertMsg[96] = "";
