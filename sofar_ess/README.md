@@ -16,7 +16,9 @@ Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator fr
 
 **Charge-only mode** clamps the ESS command to ≤ 0 W: charge from export / excess, hold charge on import — never discharge. Toggle via MQTT or HA.
 
-**SOC protect** (daytime ESS only, separate from overnight smart charging): when bidirectional ESS is running, SOC below the **low threshold** forces charge-only (no discharge); bidirectional resumes once SOC reaches **low + hysteresis** (default 15% / +5%). Tunable via MQTT or HA.
+**SOC protect** (daytime ESS): low SOC → charge-only (default 15% / +5% hyst); **high SOC → no charge** (default 98% / −2% hyst). Tunable via MQTT or HA.
+
+**Battery metering:** Sofar `0x020D` is published as **charge/discharge power** (register name). Prefer **battery DC power** = V×I from `0x020E`/`0x020F` for load math — AC-coupled Hoymiles charge is under-reported by `0x020D`. Site solar totals sum Hoymiles 1600 + 800 + Sofar DC PV strings.
 
 **Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). Force a bank via `set/battery`. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle (`DUAL_BATT_SETTLE_MS`, 15 s) → invalidate SOC → re-poll until confirmed.
 
@@ -115,7 +117,10 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/status` | pub | `online` / `offline` (LWT) — device availability |
 | `…/state` | pub | JSON snapshot every ~10 s (see fields below) |
 | `…/ess/grid_power` | pub | JSY load2 grid residual (W). +import, −export |
-| `…/ess/battery_power` | pub | Sofar measured battery power (W). +discharge, −charge |
+| `…/ess/charge_discharge_power` | pub | Sofar `0x020D` charge/discharge power (W). +discharge, −charge |
+| `…/ess/battery_dc_power` | pub | Battery DC power from V×I (W). Prefer this for load / acceptance |
+| `…/ess/battery_voltage` | pub | Battery voltage (V) from `0x020E` |
+| `…/ess/battery_current` | pub | Battery current (A) from `0x020F` |
 | `…/ess/energy_import_wh` | pub | JSY channel-2 energy imported from grid (Wh) |
 | `…/ess/energy_export_wh` | pub | JSY channel-2 energy exported to grid (Wh) |
 | `…/ess/command_w` | pub | Last ESS setpoint sent to Sofar (+discharge / −charge; near-zero uses hold min, not 0) |
@@ -124,9 +129,12 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/ess/charge_only` | pub | User charge-only preference (`true` / `false`, retained) |
 | `…/ess/effective_charge_only` | pub | Effective charge-only (user **or** SOC protect, retained) |
 | `…/ess/soc_protect/enabled` | pub | SOC protect on/off (retained) |
-| `…/ess/soc_protect/low` | pub | Low SOC threshold % — below this, ESS goes charge-only (retained) |
-| `…/ess/soc_protect/hyst` | pub | Hysteresis % — bidirectional resumes at low + hyst (retained) |
-| `…/ess/soc_protect/active` | pub | `true` when SOC protect has forced charge-only |
+| `…/ess/soc_protect/low` | pub | Low SOC % — below this, ESS goes charge-only (retained) |
+| `…/ess/soc_protect/hyst` | pub | Low hysteresis % — bidirectional resumes at low + hyst (retained) |
+| `…/ess/soc_protect/active` | pub | `true` when low-SOC protect has forced charge-only |
+| `…/ess/soc_protect/high` | pub | High SOC % — at/above this, ESS blocks charge (retained) |
+| `…/ess/soc_protect/high_hyst` | pub | High hysteresis % — charge resumes at high − hyst (retained) |
+| `…/ess/soc_protect/full_active` | pub | `true` when high-SOC protect blocks charge |
 | `…/ess/kp` | pub | PI proportional gain (retained) |
 | `…/ess/ki` | pub | PI integral gain in 1/s (retained) |
 | `…/ess/deadband` | pub | ESS deadband watts (retained) |
@@ -145,9 +153,11 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/battery/dual_enabled` | pub | Auto dual-battery policy on/off (retained) |
 | `…/set/ess` | sub | `true` / `false` — enable/disable; `charge_only` = enable + soak-only; `full` = enable + bidirectional |
 | `…/set/charge_only` | sub | `true` / `false` — user charge-only preference (cmd ≤ 0) |
-| `…/set/soc_protect` | sub | `true` / `false` — enable SOC-based charge-only protect |
+| `…/set/soc_protect` | sub | `true` / `false` — enable SOC protect (low + high) |
 | `…/set/soc_protect_low` | sub | int 1…100 — low SOC threshold % |
-| `…/set/soc_protect_hyst` | sub | int 0…30 — hysteresis % above low before bidirectional resumes |
+| `…/set/soc_protect_hyst` | sub | int 0…30 — low hysteresis % |
+| `…/set/soc_protect_high` | sub | int 50…100 — high SOC threshold % |
+| `…/set/soc_protect_high_hyst` | sub | int 0…30 — high hysteresis % |
 | `…/set/kp` | sub | float 0…5 — set Kp live |
 | `…/set/ki` | sub | float 0…5 — set Ki live (1/s) |
 | `…/set/deadband` | sub | float 0…500 — deadband watts |
@@ -186,8 +196,8 @@ mosquitto_pub -t sofaress/set/battery -m Auto
 | `ess_enabled` | Closed-loop ESS on/off |
 | `ess_charge_only` | User charge-only preference |
 | `ess_effective_charge_only` | Effective charge-only (user or SOC protect) |
-| `ess_soc_protect_enabled` / `ess_soc_protect_low` / `ess_soc_protect_hyst` | SOC protect config |
-| `ess_soc_protect_active` | SOC protect currently forcing charge-only |
+| `ess_soc_protect_enabled` / `…_low` / `…_hyst` / `…_active` | Low-SOC protect |
+| `ess_soc_protect_high` / `…_high_hyst` / `ess_soc_full_active` | High-SOC (no charge) protect |
 | `grid_power_w` | JSY residual grid power (W) |
 | `energy_import_wh` / `energy_export_wh` | JSY energy totals |
 | `ess_command_w` | Last commanded battery offset (W) |
@@ -217,7 +227,9 @@ mosquitto_pub -t sofaress/set/battery -m Auto
 | `batt_fault_message` | Decoded battery fault bits (regs `0x023D`–`0x0241`) |
 | `batt_fault_raw` | Five battery-fault words as hex |
 | `battery_soc` | Battery state of charge % |
-| `battery_power_w` | Measured battery power (W) |
+| `charge_discharge_power_w` | Sofar `0x020D` charge/discharge power (W) |
+| `battery_dc_power_w` | Battery DC power V×I (W); null until first V/I read |
+| `battery_voltage_v` / `battery_current_a` | Battery V / I |
 | `sofar_grid_raw` | Raw Sofar grid-power register |
 
 Manual `/set/charge|discharge|standby|auto` turns ESS off so you can take over; publish `…/set/ess` `true` to resume the loop (or `charge_only` to resume soak-only).
@@ -240,7 +252,7 @@ With MQTT discovery enabled (`HA_MQTT_DISCOVERY=1`, default), device **Sofar ESS
 - Numbers: ESS Kp, ESS Ki, Deadband, Min Delta, Hold Min, SOC protect low/hyst, Battery empty/full SOC  
 - Buttons: Standby, Auto, Reset Integral  
 
-HA package templates (in `smart_energy.yaml`): `sensor.site_solar_total_power` (Hoymiles 1600 + 800 + Sofar PV) and `sensor.site_solar_today_kwh`.
+HA package templates (in `smart_energy.yaml`): `sensor.site_solar_total_power` (Hoymiles 1600 + 800 + Sofar PV), `sensor.site_solar_today_kwh`, `sensor.house_load_power` (`grid + site_solar + battery_dc_power`, fallback to ESS command), and daily `sensor.house_load_energy_daily`.
 
 If **Sofar OK** stays off, check `sofar_last_error` (`no-rx` = wiring/DE/slave ID; `crc` = noise/baud; `exception` = bad register). Inverter **fault** run-state is separate — use **Sofar Fault** / **fault_raw** from the PDF fault-message registers.
 

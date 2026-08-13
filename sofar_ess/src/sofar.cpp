@@ -3,6 +3,9 @@
 #include "config.h"
 #include "modbus_util.h"
 
+#include <cmath>
+#include <cstring>
+
 namespace {
 HardwareSerial* bus_ = nullptr;
 SofarMode lastMode_ = SofarMode::Unknown;
@@ -34,9 +37,9 @@ constexpr uint32_t kListenTimeoutMs = 400;
 constexpr uint32_t kBusQuietMs = 6;
 constexpr uint32_t kBusDrainMaxMs = 250;
 
-// 0x020d as signed int16 ×10 → W.
+// 0x020D Charge/Discharge power: signed int16 ×0.01 kW (= ×10 W).
 // Sofar: charge +, discharge −. Our ESS convention: +discharge / −charge.
-int16_t decodeBatteryPowerW(uint16_t /*runState*/, uint16_t raw) {
+int16_t decodeChargeDischargePowerW(uint16_t raw) {
   const int32_t w = -int32_t(int16_t(raw)) * 10;
   if (w > 32767) {
     return 32767;
@@ -45,6 +48,26 @@ int16_t decodeBatteryPowerW(uint16_t /*runState*/, uint16_t raw) {
     return -32768;
   }
   return int16_t(w);
+}
+
+// 0x020E V×0.1, 0x020F I×0.01 A (Sofar charge current +). ESS: +discharge / −charge.
+void applyBatteryDcFromVI(SofarStatus& cache, uint16_t vRaw, uint16_t iRaw) {
+  cache.batteryVoltageV = float(vRaw) * 0.1f;
+  cache.batteryCurrentA = float(int16_t(iRaw)) * 0.01f;
+  const int32_t w = -lroundf(cache.batteryVoltageV * cache.batteryCurrentA);
+  if (w > 32767) {
+    cache.batteryDcPowerW = 32767;
+  } else if (w < -32768) {
+    cache.batteryDcPowerW = -32768;
+  } else {
+    cache.batteryDcPowerW = int16_t(w);
+  }
+  cache.batteryDcValid = true;
+}
+
+void applyChargeDischargeRaw(SofarStatus& cache, uint16_t raw) {
+  cache.chargeDischargePowerRaw = raw;
+  cache.chargeDischargePowerW = decodeChargeDischargePowerW(raw);
 }
 
 struct Resp {
@@ -495,13 +518,15 @@ static int absDiff(int a, int b) {
 // carries 2 data bytes and cannot satisfy an 8-byte read, so mis-pairing is
 // rejected by framing rather than by guesswork. Falls back to a single read if
 // the inverter refuses the block.
-static bool readSocReg(uint16_t& soc, uint16_t& battWRaw, bool& battWValid) {
-  battWValid = false;
+// On success with block: also fills charge/discharge power + V/I/DC power.
+static bool readSocReg(uint16_t& soc, SofarStatus* metrics) {
   if (socBlockRead_) {
     uint16_t blk[4] = {};
     if (readRegs(REG_BATTW, 4, blk)) {
-      battWRaw = blk[0];
-      battWValid = true;
+      if (metrics) {
+        applyChargeDischargeRaw(*metrics, blk[0]);
+        applyBatteryDcFromVI(*metrics, blk[1], blk[2]);
+      }
       soc = blk[3];
       return true;
     }
@@ -606,9 +631,7 @@ bool sofarPollSocNow(SofarStatus& cache) {
     return false;
   }
   uint16_t v = 0;
-  uint16_t battW = 0;
-  bool battWValid = false;
-  if (!readSocReg(v, battW, battWValid)) {
+  if (!readSocReg(v, &cache)) {
     setLastError(cache, listenFailWhy_);
     return false;
   }
@@ -616,10 +639,6 @@ bool sofarPollSocNow(SofarStatus& cache) {
   if (!ok) {
     setLastError(cache, "soc-reject");
   } else {
-    if (battWValid) {
-      cache.batteryPowerRaw = battW;
-      cache.batteryPowerW = decodeBatteryPowerW(cache.runState, battW);
-    }
     cache.ok = true;
     setLastError(cache, "");
   }
@@ -628,7 +647,7 @@ bool sofarPollSocNow(SofarStatus& cache) {
 
 bool sofarPollStatusField(SofarStatus& cache) {
   // One Modbus txn per call so ESS timing stays predictable.
-  // Phases: run → grid → batt → soc → fault[5] → alert → battFault[5]
+  // Phases: run → grid → batt(W/V/I) → soc → fault[5] → alert → battFault[5]
   //         → pv strings[6] → pv today. PV is low-priority telemetry.
   static uint8_t phase = 0;
   static uint8_t failStreak = 0;
@@ -645,7 +664,6 @@ bool sofarPollStatusField(SofarStatus& cache) {
       ok = readReg(REG_RUNSTATE, v);
       if (ok) {
         cache.runState = v;
-        cache.batteryPowerW = decodeBatteryPowerW(cache.runState, cache.batteryPowerRaw);
       }
       break;
     case 1:
@@ -654,29 +672,29 @@ bool sofarPollStatusField(SofarStatus& cache) {
         cache.gridPowerRaw = v;
       }
       break;
-    case 2:
-      ok = readReg(REG_BATTW, v);
+    case 2: {
+      // 0x020D–0x020F: charge/discharge power + V + I (DC power = V×I).
+      uint16_t blk[3] = {};
+      ok = readRegs(REG_BATTW, 3, blk);
       if (ok) {
-        cache.batteryPowerRaw = v;
-        cache.batteryPowerW = decodeBatteryPowerW(cache.runState, cache.batteryPowerRaw);
+        applyChargeDischargeRaw(cache, blk[0]);
+        applyBatteryDcFromVI(cache, blk[1], blk[2]);
+      } else if (strcmp(listenFailWhy_, "exception") == 0 || strcmp(listenFailWhy_, "len") == 0) {
+        ok = readReg(REG_BATTW, v);
+        if (ok) {
+          applyChargeDischargeRaw(cache, v);
+        }
       }
       break;
+    }
     case 3: {
-      uint16_t battW = 0;
-      bool battWValid = false;
-      ok = readSocReg(v, battW, battWValid);
+      ok = readSocReg(v, &cache);
       if (ok) {
         ok = acceptSoc(cache, v);
         if (!ok) {
           setLastError(cache, "soc-reject");
-        } else {
-          if (battWValid) {
-            cache.batteryPowerRaw = battW;
-            cache.batteryPowerW = decodeBatteryPowerW(cache.runState, battW);
-          }
-          if (preferSocPoll_) {
-            preferSocPoll_ = false;
-          }
+        } else if (preferSocPoll_) {
+          preferSocPoll_ = false;
         }
       }
       break;

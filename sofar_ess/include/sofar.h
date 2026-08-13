@@ -16,9 +16,17 @@ enum class SofarMode : uint8_t {
 struct SofarStatus {
   uint16_t runState = 0;
   uint16_t gridPowerRaw = 0;
-  uint16_t batteryPowerRaw = 0;
-  // Signed battery power (W): +discharge, −charge. 0 if idle / unknown.
-  int16_t batteryPowerW = 0;
+
+  // 0x020D Charge/Discharge power (Sofar map name). ESS sign: +discharge, −charge.
+  uint16_t chargeDischargePowerRaw = 0;
+  int16_t chargeDischargePowerW = 0;
+
+  // 0x020E / 0x020F — DC terminal V×I (preferred measured battery power).
+  float batteryVoltageV = 0.0f;
+  float batteryCurrentA = 0.0f;
+  int16_t batteryDcPowerW = 0; // V×I, ESS sign +discharge / −charge
+  bool batteryDcValid = false;
+
   uint16_t batterySoc = 0;
   bool socValid = false;
   bool ok = false;

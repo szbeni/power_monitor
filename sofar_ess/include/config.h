@@ -79,7 +79,7 @@
 #define ESS_CHARGE_ONLY 0
 #endif
 
-// SOC protect: below low threshold ESS becomes charge-only; resumes bidirectional at low+hyst.
+// SOC protect: below low → charge-only; at/above high → no charge (discharge-only).
 #ifndef ESS_SOC_PROTECT_ENABLE
 #define ESS_SOC_PROTECT_ENABLE 1
 #endif
@@ -89,7 +89,12 @@
 #ifndef ESS_SOC_PROTECT_HYST
 #define ESS_SOC_PROTECT_HYST 5
 #endif
-
+#ifndef ESS_SOC_PROTECT_HIGH
+#define ESS_SOC_PROTECT_HIGH 98
+#endif
+#ifndef ESS_SOC_PROTECT_HIGH_HYST
+#define ESS_SOC_PROTECT_HIGH_HYST 2
+#endif
 // How often to sample JSY snapshot and update Sofar (ms).
 // ~500 ms tracks MycilaJSY @ 38400 (~330 ms change detect) without flooding RS485.
 #ifndef ESS_LOOP_INTERVAL_MS

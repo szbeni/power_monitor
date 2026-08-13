@@ -17,6 +17,25 @@
 #
 # Edit FORECAST entities below if your Forecast.Solar IDs differ.
 
+# House load energy (Riemann sum of house_load_power → daily kWh)
+sensor:
+  - platform: integration
+    source: sensor.house_load_power
+    name: House Load Energy
+    unique_id: house_load_energy
+    unit_prefix: k
+    round: 3
+    method: left
+    max_sub_interval:
+      minutes: 1
+
+utility_meter:
+  house_load_energy_daily:
+    unique_id: house_load_energy_daily
+    source: sensor.house_load_energy
+    name: House Load Energy Daily
+    cycle: daily
+
 input_boolean:
   smart_charge_enabled:
     name: Smart overnight charge
@@ -216,6 +235,37 @@ template:
           hoymiles_1600_kwh: "{{ states('sensor.opendtu_60d84c_yield_day') }}"
           hoymiles_800_kwh: "{{ states('sensor.home_today_s_energy') }}"
           sofar_pv_kwh: "{{ states('sensor.sofar_ess_pv_today') }}"
+
+      # load = grid + site_solar + battery_dc (V×I). Prefer DC power over 0x020D /
+      # command — AC-coupled charge is under-reported by charge/discharge power.
+      - name: House Load Power
+        unique_id: house_load_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:home-lightning-bolt
+        state: >-
+          {% set grid = states('sensor.sofar_ess_grid_power') %}
+          {% set solar = states('sensor.site_solar_total_power') %}
+          {% set batt = states('sensor.sofar_ess_battery_dc_power') %}
+          {% set cmd = states('sensor.sofar_ess_ess_command') %}
+          {% set g = grid | float(0) if grid not in ['unknown', 'unavailable', 'none', ''] else 0 %}
+          {% set s = solar | float(0) if solar not in ['unknown', 'unavailable', 'none', ''] else 0 %}
+          {% if batt not in ['unknown', 'unavailable', 'none', ''] %}
+            {% set b = batt | float(0) %}
+          {% elif cmd not in ['unknown', 'unavailable', 'none', ''] %}
+            {% set b = cmd | float(0) %}
+          {% else %}
+            {% set b = 0 %}
+          {% endif %}
+          {{ (g + s + b) | round(0) }}
+        attributes:
+          grid_w: "{{ states('sensor.sofar_ess_grid_power') }}"
+          solar_w: "{{ states('sensor.site_solar_total_power') }}"
+          battery_dc_w: "{{ states('sensor.sofar_ess_battery_dc_power') }}"
+          battery_term: >-
+            {% set batt = states('sensor.sofar_ess_battery_dc_power') %}
+            {{ 'battery_dc' if batt not in ['unknown', 'unavailable', 'none', ''] else 'ess_command_fallback' }}
 
       - name: Smart Charge Target SOC
         unique_id: smart_charge_target_soc
@@ -652,6 +702,26 @@ automation:
         data:
           status: error
           reason: "SOC became unavailable — forced standby"
+
+  - id: smart_charge_learn_demand
+    alias: Smart charge learn daily demand
+    description: Smooth learned household demand from house load energy daily.
+    mode: single
+    trigger:
+      - platform: time
+        at: "23:50:00"
+    action:
+      - variables:
+          today: "{{ states('sensor.house_load_energy_daily') | float(0) }}"
+          old: "{{ states('input_number.smart_charge_learned_demand_kwh') | float(12) }}"
+          blended: "{{ (0.7 * old + 0.3 * today) | round(2) }}"
+      - condition: template
+        value_template: "{{ today > 0.5 }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_learned_demand_kwh
+        data:
+          value: "{{ blended }}"
 
   - id: smart_charge_learn_forecast_bias
     alias: Smart charge learn forecast bias

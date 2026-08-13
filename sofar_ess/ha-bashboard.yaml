@@ -417,17 +417,20 @@ views:
             entity: sensor.sofar_ess_pv2_power
             name: Sofar PV2
           - type: entity
-            entity: sensor.sofar_ess_pv_total
+            entity: sensor.sofar_ess_sofar_pv_total
             name: Sofar PV
           - type: entity
             entity: sensor.site_solar_total_power
             name: Solar Total
           - type: entity
-            entity: sensor.load_power
+            entity: sensor.house_load_power
             name: Load
           - type: entity
-            entity: sensor.sofar_ess_battery_power
-            name: Battery
+            entity: sensor.sofar_ess_battery_dc_power
+            name: Battery DC
+          - type: entity
+            entity: sensor.sofar_ess_charge_discharge_power
+            name: Chg/Dchg pwr
           - type: entity
             entity: sensor.sofar_ess_battery_combined_soc
             name: Combined SOC
@@ -443,6 +446,9 @@ views:
           - type: entity
             entity: sensor.smart_charge_status
             name: Smart charge
+          - type: entity
+            entity: binary_sensor.sofar_ess_ess_soc_full_active
+            name: SOC full
         columns: 2
       - type: history-graph
         title: Power (1 h)
@@ -454,14 +460,14 @@ views:
             name: Solar 1600
           - entity: sensor.home_pv_power
             name: Solar 800
-          - entity: sensor.sofar_ess_pv_total
+          - entity: sensor.sofar_ess_sofar_pv_total
             name: Sofar PV
           - entity: sensor.sofar_ess_grid_power
             name: Grid
-          - entity: sensor.load_power
+          - entity: sensor.house_load_power
             name: Load
-          - entity: sensor.sofar_ess_battery_power
-            name: Battery
+          - entity: sensor.sofar_ess_battery_dc_power
+            name: Battery DC
       - type: history-graph
         title: Battery SOC (24 h)
         hours_to_show: 24
@@ -476,9 +482,9 @@ views:
         title: Sofar PV
         show_header_toggle: false
         entities:
-          - entity: sensor.sofar_ess_pv_total
+          - entity: sensor.sofar_ess_sofar_pv_total
             name: Sofar PV total
-          - entity: sensor.sofar_ess_pv_today
+          - entity: sensor.sofar_ess_sofar_pv_today
             name: Sofar PV today
           - type: divider
           - entity: sensor.sofar_ess_pv1_power
@@ -532,11 +538,17 @@ views:
           - entity: switch.sofar_ess_ess_soc_protect
             name: SOC protect
           - entity: binary_sensor.sofar_ess_ess_soc_protect_active
-            name: SOC protect active
+            name: SOC protect active (low)
+          - entity: binary_sensor.sofar_ess_ess_soc_full_active
+            name: SOC full active (high)
           - entity: number.sofar_ess_ess_soc_protect_low
             name: SOC protect low (%)
           - entity: number.sofar_ess_ess_soc_protect_hysteresis
-            name: SOC protect hysteresis (%)
+            name: SOC protect low hysteresis (%)
+          - entity: number.sofar_ess_ess_soc_protect_high
+            name: SOC protect high (%)
+          - entity: number.sofar_ess_ess_soc_protect_high_hysteresis
+            name: SOC protect high hysteresis (%)
           - type: divider
           - entity: number.sofar_ess_ess_kp
             name: Kp
@@ -604,11 +616,13 @@ views:
         entities:
           - entity: sensor.site_solar_today_kwh
             name: Site solar today
+          - entity: sensor.house_load_energy_daily
+            name: House load today
           - entity: sensor.opendtu_60d84c_yield_day
             name: Solar 1600 yield
           - entity: sensor.home_today_s_energy
             name: Solar 800 yield
-          - entity: sensor.sofar_ess_pv_today
+          - entity: sensor.sofar_ess_sofar_pv_today
             name: Sofar PV yield
           - entity: sensor.grid_energy_imported_daily
             name: Grid import
@@ -628,14 +642,16 @@ views:
             name: Solar 1600
           - entity: sensor.home_pv_power
             name: Solar 800
-          - entity: sensor.sofar_ess_pv_total
+          - entity: sensor.sofar_ess_sofar_pv_total
             name: Sofar PV
           - entity: sensor.sofar_ess_grid_power
             name: Grid
-          - entity: sensor.load_power
+          - entity: sensor.house_load_power
             name: Load
-          - entity: sensor.sofar_ess_battery_power
-            name: Battery
+          - entity: sensor.sofar_ess_battery_dc_power
+            name: Battery DC
+          - entity: sensor.sofar_ess_charge_discharge_power
+            name: Chg/Dchg
       - type: statistics-graph
         title: Hourly averages (24 h)
         days_to_show: 1
@@ -650,11 +666,11 @@ views:
             name: Solar 1600
           - entity: sensor.home_pv_power
             name: Solar 800
-          - entity: sensor.sofar_ess_pv_total
+          - entity: sensor.sofar_ess_sofar_pv_total
             name: Sofar PV
           - entity: sensor.sofar_ess_grid_power
             name: Grid
-          - entity: sensor.load_power
+          - entity: sensor.house_load_power
             name: Load
   - title: Cameras
     path: cameras

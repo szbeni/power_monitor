@@ -35,7 +35,10 @@ static bool essChargeOnlyUser = ESS_CHARGE_ONLY;
 static bool essSocProtectEnabled = ESS_SOC_PROTECT_ENABLE;
 static uint8_t essSocProtectLow = ESS_SOC_PROTECT_LOW;
 static uint8_t essSocProtectHyst = ESS_SOC_PROTECT_HYST;
-static bool essSocProtectActive = false;
+static bool essSocProtectActive = false; // low SOC → charge-only
+static uint8_t essSocProtectHigh = ESS_SOC_PROTECT_HIGH;
+static uint8_t essSocProtectHighHyst = ESS_SOC_PROTECT_HIGH_HYST;
+static bool essSocFullActive = false; // high SOC → no charge
 static float essKp = ESS_KP;
 static float essKi = ESS_KI;
 static float essDeadbandW = float(ESS_DEADBAND_W);
@@ -109,11 +112,18 @@ static bool essEffectiveChargeOnly() {
   return essChargeOnlyUser || essSocProtectActive;
 }
 
+static bool essNoCharge() {
+  return essSocFullActive;
+}
+
 static void publishSocProtectParams() {
   mqttPublish("ess/soc_protect/enabled", essSocProtectEnabled ? "true" : "false", true);
   mqttPublish("ess/soc_protect/low", String(essSocProtectLow), true);
   mqttPublish("ess/soc_protect/hyst", String(essSocProtectHyst), true);
   mqttPublish("ess/soc_protect/active", essSocProtectActive ? "true" : "false", true);
+  mqttPublish("ess/soc_protect/high", String(essSocProtectHigh), true);
+  mqttPublish("ess/soc_protect/high_hyst", String(essSocProtectHighHyst), true);
+  mqttPublish("ess/soc_protect/full_active", essSocFullActive ? "true" : "false", true);
 }
 
 static void publishEssParams() {
@@ -127,11 +137,19 @@ static void publishEssParams() {
   publishSocProtectParams();
 }
 
-// Bidirectional ESS → charge-only when SOC drops; resume at low + hysteresis.
+// Bidirectional ESS → charge-only when SOC drops; no-charge when SOC is full.
 static void updateEssSocProtect() {
   if (!essSocProtectEnabled || !essEnabled) {
+    bool changed = false;
     if (essSocProtectActive) {
       essSocProtectActive = false;
+      changed = true;
+    }
+    if (essSocFullActive) {
+      essSocFullActive = false;
+      changed = true;
+    }
+    if (changed) {
       publishSocProtectParams();
       mqttPublish("ess/effective_charge_only", essEffectiveChargeOnly() ? "true" : "false", true);
     }
@@ -142,8 +160,11 @@ static void updateEssSocProtect() {
   }
 
   const uint8_t soc = uint8_t(lastSofar.batterySoc);
-  const uint8_t resumeAt = uint8_t(min(100u, unsigned(essSocProtectLow) + unsigned(essSocProtectHyst)));
+  const uint8_t resumeLowAt =
+      uint8_t(min(100u, unsigned(essSocProtectLow) + unsigned(essSocProtectHyst)));
+  const int resumeHighAt = int(essSocProtectHigh) - int(essSocProtectHighHyst);
 
+  // Low SOC → charge-only
   if (!essSocProtectActive && soc < essSocProtectLow) {
     essSocProtectActive = true;
     if (essIntegral > 0.0f) {
@@ -152,13 +173,28 @@ static void updateEssSocProtect() {
     Log.printf("[ess] SOC %u < %u — charge-only protect\n", soc, essSocProtectLow);
     publishSocProtectParams();
     mqttPublish("ess/effective_charge_only", "true", true);
-  } else if (essSocProtectActive && soc >= resumeAt) {
+  } else if (essSocProtectActive && soc >= resumeLowAt) {
     essSocProtectActive = false;
-    Log.printf("[ess] SOC %u >= %u — bidirectional resumed\n", soc, resumeAt);
+    Log.printf("[ess] SOC %u >= %u — bidirectional (low) resumed\n", soc, resumeLowAt);
     publishSocProtectParams();
     mqttPublish("ess/effective_charge_only", essEffectiveChargeOnly() ? "true" : "false", true);
   }
+
+  // High SOC → no charge
+  if (!essSocFullActive && soc >= essSocProtectHigh) {
+    essSocFullActive = true;
+    if (essIntegral < 0.0f) {
+      essIntegral = 0.0f;
+    }
+    Log.printf("[ess] SOC %u >= %u — full protect (no charge)\n", soc, essSocProtectHigh);
+    publishSocProtectParams();
+  } else if (essSocFullActive && int(soc) <= resumeHighAt) {
+    essSocFullActive = false;
+    Log.printf("[ess] SOC %u <= %d — charge allowed again\n", soc, resumeHighAt);
+    publishSocProtectParams();
+  }
 }
+
 struct Load2Snapshot {
   float voltage = NAN;
   float current = NAN;
@@ -614,7 +650,15 @@ struct HaSensor {
 
 static const HaSensor kHaSensors[] = {
     {"grid_power", "Grid Power", "{{ value_json.grid_power_w }}", "W", "power", "measurement"},
-    {"battery_power", "Battery Power", "{{ value_json.battery_power_w }}", "W", "power", "measurement"},
+    {"charge_discharge_power",
+     "Charge/Discharge Power",
+     "{{ value_json.charge_discharge_power_w }}",
+     "W",
+     "power",
+     "measurement"},
+    {"battery_dc_power", "Battery DC Power", "{{ value_json.battery_dc_power_w }}", "W", "power", "measurement"},
+    {"battery_voltage", "Battery Voltage", "{{ value_json.battery_voltage_v }}", "V", "voltage", "measurement"},
+    {"battery_current", "Battery Current", "{{ value_json.battery_current_a }}", "A", "current", "measurement"},
     {"ess_command", "ESS Command", "{{ value_json.ess_command_w }}", "W", "power", "measurement"},
     {"battery_soc", "Battery SOC", "{{ value_json.battery_soc }}", "%", "battery", "measurement"},
     {"battery_a_soc", "Battery A SOC", "{{ value_json.battery_a_soc }}", "%", "battery", "measurement"},
@@ -830,6 +874,25 @@ static void publishHaDiscovery() {
     haPublishConfig("binary_sensor", "ess_soc_protect_active", payload);
   }
 
+  {
+    JsonDocument doc;
+    doc["name"] = "ESS SOC Full Active";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_ess_soc_full_active", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = String(DEVICE_NAME) + "/ess/soc_protect/full_active";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    doc["payload_on"] = "true";
+    doc["payload_off"] = "false";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("binary_sensor", "ess_soc_full_active", payload);
+  }
+
   // PI gain numbers (MQTT set/kp|ki)
   struct {
     const char* objectId;
@@ -847,6 +910,14 @@ static void publishHaDiscovery() {
       {"hold_min", "ESS Hold Min", "ess/hold_min", "set/hold_min", 1.0f, float(MAX_POWER_W), 5.0f},
       {"soc_protect_low", "ESS SOC Protect Low", "ess/soc_protect/low", "set/soc_protect_low", 1.0f, 100.0f, 1.0f},
       {"soc_protect_hyst", "ESS SOC Protect Hysteresis", "ess/soc_protect/hyst", "set/soc_protect_hyst", 0.0f, 30.0f, 1.0f},
+      {"soc_protect_high", "ESS SOC Protect High", "ess/soc_protect/high", "set/soc_protect_high", 50.0f, 100.0f, 1.0f},
+      {"soc_protect_high_hyst",
+       "ESS SOC Protect High Hysteresis",
+       "ess/soc_protect/high_hyst",
+       "set/soc_protect_high_hyst",
+       0.0f,
+       30.0f,
+       1.0f},
 #if DUAL_BATT_ENABLE
       {"dual_batt_empty", "Battery Empty SOC", "battery/empty", "set/dual_batt_empty", 0.0f, 100.0f, 1.0f},
       {"dual_batt_full", "Battery Full SOC", "battery/full", "set/dual_batt_full", 0.0f, 100.0f, 1.0f},
@@ -1010,9 +1081,11 @@ static void applyEss(float gridPowerW) {
   const float e = gridPowerW;
   const float maxW = float(MAX_POWER_W);
   const bool chargeOnly = essEffectiveChargeOnly();
+  const bool noCharge = essNoCharge();
   // Charge-only: allow charge (−) and hold, never discharge (+).
+  // Full / charge-rejected: allow discharge (+) only, never charge (−).
   const float uMax = chargeOnly ? 0.0f : maxW;
-  const float uMin = -maxW;
+  const float uMin = noCharge ? 0.0f : -maxW;
 
   float uProbe = essKp * e + essKi * essIntegral;
   const bool saturated = (uProbe > uMax) || (uProbe < uMin);
@@ -1022,10 +1095,11 @@ static void applyEss(float gridPowerW) {
     essIntegral += e * Ts;
     const float iLim = (essKi > 1e-6f) ? (maxW / essKi) : maxW;
     const float iMax = chargeOnly ? 0.0f : iLim;
+    const float iMin = noCharge ? 0.0f : -iLim;
     if (essIntegral > iMax) {
       essIntegral = iMax;
-    } else if (essIntegral < -iLim) {
-      essIntegral = -iLim;
+    } else if (essIntegral < iMin) {
+      essIntegral = iMin;
     }
   }
 
@@ -1053,15 +1127,20 @@ static void applyEss(float gridPowerW) {
     targetW = 0;
   }
 
-  // Hard clamp: charge-only never issues a discharge command.
+  // Hard clamps.
   if (chargeOnly && targetW > 0) {
+    targetW = 0;
+  }
+  if (noCharge && targetW < 0) {
     targetW = 0;
   }
 
   // Near-zero: hold min charge/discharge instead of standby (Sofar relay chatter).
   if (targetW == 0) {
     const int16_t hold = int16_t(essHoldMinW);
-    if (chargeOnly || lastCmdW < 0 || sofarLastMode() == SofarMode::Charge) {
+    if (noCharge) {
+      targetW = hold; // discharge hold when full / charge rejected
+    } else if (chargeOnly || lastCmdW < 0 || sofarLastMode() == SofarMode::Charge) {
       targetW = -hold;
     } else if (lastCmdW > 0 || sofarLastMode() == SofarMode::Discharge) {
       targetW = hold;
@@ -1089,7 +1168,7 @@ static void applyEss(float gridPowerW) {
     lastCmdMs = now;
   }
 
-  Log.printf("[ess] grid=%.1fW u=%.1f I=%.1f dt=%.2f kp=%.2f ki=%.2f cmd=%d (%s%s%s) ok=%d\n",
+  Log.printf("[ess] grid=%.1fW u=%.1f I=%.1f dt=%.2f kp=%.2f ki=%.2f cmd=%d (%s%s%s%s) ok=%d\n",
              gridPowerW,
              u,
              essIntegral,
@@ -1099,12 +1178,17 @@ static void applyEss(float gridPowerW) {
              int(targetW),
              modeName(sofarLastMode()),
              chargeOnly ? " charge_only" : "",
-             essSocProtectActive ? " soc_protect" : "",
+             essSocProtectActive ? " soc_low" : "",
+             essSocFullActive ? " soc_full" : "",
              int(ok));
   mqttPublish("ess/grid_power", String(gridPowerW, 1));
   mqttPublish("ess/command_w", String(targetW));
   mqttPublish("ess/mode", modeName(sofarLastMode()));
   mqttPublish("ess/integral", String(essIntegral, 1));
+  if (lastSofar.batteryDcValid) {
+    mqttPublish("ess/battery_dc_power", String(lastSofar.batteryDcPowerW));
+  }
+  mqttPublish("ess/charge_discharge_power", String(lastSofar.chargeDischargePowerW));
 }
 
 static void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -1168,8 +1252,9 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   if (cmd == "soc_protect" || cmd == "soc_protect_enabled") {
     essSocProtectEnabled = (msg != "false" && msg != "0" && msg != "off");
-    if (!essSocProtectEnabled && essSocProtectActive) {
+    if (!essSocProtectEnabled) {
       essSocProtectActive = false;
+      essSocFullActive = false;
     }
     Log.printf("[ess] soc_protect=%d\n", int(essSocProtectEnabled));
     publishEssParams();
@@ -1196,6 +1281,30 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       publishEssParams();
     } else {
       Log.println("[ess] soc_protect_hyst out of range (0..30)");
+    }
+    return;
+  }
+
+  if (cmd == "soc_protect_high" || cmd == "soc_high") {
+    const int v = msg.toInt();
+    if (v >= 50 && v <= 100) {
+      essSocProtectHigh = uint8_t(v);
+      Log.printf("[ess] soc_protect_high=%u\n", essSocProtectHigh);
+      publishEssParams();
+    } else {
+      Log.println("[ess] soc_protect_high out of range (50..100)");
+    }
+    return;
+  }
+
+  if (cmd == "soc_protect_high_hyst" || cmd == "soc_high_hyst") {
+    const int v = msg.toInt();
+    if (v >= 0 && v <= 30) {
+      essSocProtectHighHyst = uint8_t(v);
+      Log.printf("[ess] soc_protect_high_hyst=%u\n", essSocProtectHighHyst);
+      publishEssParams();
+    } else {
+      Log.println("[ess] soc_protect_high_hyst out of range (0..30)");
     }
     return;
   }
@@ -1483,6 +1592,12 @@ static void publishState() {
   json += String(essSocProtectHyst);
   json += ",\"ess_soc_protect_active\":";
   json += essSocProtectActive ? "true" : "false";
+  json += ",\"ess_soc_protect_high\":";
+  json += String(essSocProtectHigh);
+  json += ",\"ess_soc_protect_high_hyst\":";
+  json += String(essSocProtectHighHyst);
+  json += ",\"ess_soc_full_active\":";
+  json += essSocFullActive ? "true" : "false";
   json += ",\"grid_power_w\":";
   json += isnan(lastGridPowerW) ? "null" : String(lastGridPowerW, 1);
   json += ",\"energy_import_wh\":";
@@ -1568,8 +1683,14 @@ static void publishState() {
     json += String(lastSofar.runState);
     json += ",\"battery_soc\":";
     json += lastSofar.socValid ? String(lastSofar.batterySoc) : String("null");
-    json += ",\"battery_power_w\":";
-    json += String(lastSofar.batteryPowerW);
+    json += ",\"charge_discharge_power_w\":";
+    json += String(lastSofar.chargeDischargePowerW);
+    json += ",\"battery_dc_power_w\":";
+    json += lastSofar.batteryDcValid ? String(lastSofar.batteryDcPowerW) : String("null");
+    json += ",\"battery_voltage_v\":";
+    json += lastSofar.batteryDcValid ? String(lastSofar.batteryVoltageV, 1) : String("null");
+    json += ",\"battery_current_a\":";
+    json += lastSofar.batteryDcValid ? String(lastSofar.batteryCurrentA, 2) : String("null");
     json += ",\"sofar_grid_raw\":";
     json += String(lastSofar.gridPowerRaw);
   }
