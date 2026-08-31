@@ -10,6 +10,9 @@ namespace {
 HardwareSerial* bus_ = nullptr;
 SofarMode lastMode_ = SofarMode::Unknown;
 uint16_t lastSetpointW_ = 0;
+uint8_t lastPassiveStatus_ = 0;
+uint8_t lastPassiveResult_ = 0;
+bool lastPassiveValid_ = false;
 
 constexpr uint8_t FN_READ = 0x03;
 constexpr uint8_t FN_PASSIVE = 0x42;
@@ -63,11 +66,13 @@ void applyBatteryDcFromVI(SofarStatus& cache, uint16_t vRaw, uint16_t iRaw) {
     cache.batteryDcPowerW = int16_t(w);
   }
   cache.batteryDcValid = true;
+  cache.batteryDcMs = millis();
 }
 
 void applyChargeDischargeRaw(SofarStatus& cache, uint16_t raw) {
   cache.chargeDischargePowerRaw = raw;
   cache.chargeDischargePowerW = decodeChargeDischargePowerW(raw);
+  cache.chargeDischargeMs = millis();
 }
 
 struct Resp {
@@ -230,8 +235,16 @@ bool sendPassive(uint16_t cmd, uint16_t param) {
     return false;
   }
   const uint16_t code = (uint16_t(rs.data[0]) << 8) | rs.data[1];
-  Log.printf("[sofar] passive 0x%04X param=%u -> 0x%04X\n", cmd, param, code);
-  return (code & 0xff) == 0;
+  lastPassiveStatus_ = uint8_t(code >> 8);
+  lastPassiveResult_ = uint8_t(code & 0xff);
+  lastPassiveValid_ = true;
+  Log.printf("[sofar] passive 0x%04X param=%u -> 0x%04X (st=0x%02X res=%u)\n",
+             cmd,
+             param,
+             code,
+             lastPassiveStatus_,
+             lastPassiveResult_);
+  return lastPassiveResult_ == 0;
 }
 
 bool readRegs(uint16_t reg, uint16_t count, uint16_t* values) {
@@ -803,4 +816,24 @@ SofarMode sofarLastMode() {
 
 uint16_t sofarLastSetpointW() {
   return lastSetpointW_;
+}
+
+bool sofarPassiveStatusValid() {
+  return lastPassiveValid_;
+}
+
+uint8_t sofarLastPassiveStatus() {
+  return lastPassiveStatus_;
+}
+
+uint8_t sofarLastPassiveResult() {
+  return lastPassiveResult_;
+}
+
+bool sofarChargeProhibited() {
+  return lastPassiveValid_ && (lastPassiveStatus_ & 0x04) != 0;
+}
+
+bool sofarDischargeProhibited() {
+  return lastPassiveValid_ && (lastPassiveStatus_ & 0x08) != 0;
 }

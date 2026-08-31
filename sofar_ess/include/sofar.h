@@ -26,6 +26,8 @@ struct SofarStatus {
   float batteryCurrentA = 0.0f;
   int16_t batteryDcPowerW = 0; // V×I, ESS sign +discharge / −charge
   bool batteryDcValid = false;
+  uint32_t batteryDcMs = 0;
+  uint32_t chargeDischargeMs = 0;
 
   uint16_t batterySoc = 0;
   bool socValid = false;
@@ -79,6 +81,15 @@ void sofarPreferSocPoll(bool enable);
 bool sofarPollSocNow(SofarStatus& cache);
 SofarMode sofarLastMode();
 uint16_t sofarLastSetpointW();
+
+// Last passive (0x42) reply: result = low byte, status = high byte.
+// Status bits: 0 charge enabled, 1 discharge enabled, 2 battery full / charge
+// prohibited, 3 battery flat / discharge prohibited.
+bool sofarPassiveStatusValid();
+uint8_t sofarLastPassiveStatus();
+uint8_t sofarLastPassiveResult();
+bool sofarChargeProhibited();
+bool sofarDischargeProhibited();
 
 const char* sofarRunStateName(uint16_t runState);
 // Append active fault/alert bit names into out (comma-separated). Returns out.

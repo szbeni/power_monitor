@@ -127,7 +127,7 @@
 #define DUAL_BATT_ENABLE 1
 #endif
 #ifndef DUAL_BATT_EMPTY_SOC
-#define DUAL_BATT_EMPTY_SOC 10
+#define DUAL_BATT_EMPTY_SOC 20
 #endif
 #ifndef DUAL_BATT_FULL_SOC
 #define DUAL_BATT_FULL_SOC 98
@@ -180,6 +180,47 @@
 #endif
 #ifndef DUAL_BATT_DEFAULT_BANK
 #define DUAL_BATT_DEFAULT_BANK 1 // 1=A, 2=B
+#endif
+
+// Commanded vs actual battery power (supervisory; does not close the PI loop).
+#ifndef FOLLOW_MIN_CMD_W
+#define FOLLOW_MIN_CMD_W 200
+#endif
+#ifndef FOLLOW_ACTUAL_FLOOR_W
+#define FOLLOW_ACTUAL_FLOOR_W 80
+#endif
+#ifndef FOLLOW_RATIO
+#define FOLLOW_RATIO 0.25f
+#endif
+#ifndef FOLLOW_CONFIRM_MS
+#define FOLLOW_CONFIRM_MS 25000
+#endif
+#ifndef FOLLOW_GRACE_MS
+#define FOLLOW_GRACE_MS 30000
+#endif
+#ifndef FOLLOW_ACTUAL_STALE_MS
+#define FOLLOW_ACTUAL_STALE_MS 15000
+#endif
+#ifndef FOLLOW_RAMP_STEP_W
+#define FOLLOW_RAMP_STEP_W 20
+#endif
+#ifndef FOLLOW_EMPTY_SOC
+#define FOLLOW_EMPTY_SOC 25
+#endif
+#ifndef FOLLOW_FULL_SOC
+#define FOLLOW_FULL_SOC 90
+#endif
+#ifndef FOLLOW_RECOVER_HOLD_MS
+#define FOLLOW_RECOVER_HOLD_MS 3000
+#endif
+#ifndef FOLLOW_RECOVER_COOLDOWN_MS
+#define FOLLOW_RECOVER_COOLDOWN_MS 300000
+#endif
+#ifndef FOLLOW_RECOVER_WINDOW_MS
+#define FOLLOW_RECOVER_WINDOW_MS 1800000
+#endif
+#ifndef FOLLOW_RECOVER_MAX
+#define FOLLOW_RECOVER_MAX 2
 #endif
 
 // PI gains for zero-export (Ts = ESS_LOOP_INTERVAL_MS). Tunable via MQTT set/kp|ki.

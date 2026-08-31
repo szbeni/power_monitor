@@ -57,6 +57,24 @@ static uint32_t lastCmdMs = 0;
 static int16_t lastCmdW = 0; // +discharge, -charge, 0=standby
 static uint8_t chargeTargetSoc = 0; // 0 = no limit; manual charge stops at target → standby
 
+enum class FollowRecoverState : uint8_t { Idle = 0, Standby, Hold };
+enum class FollowRecovery : uint8_t { None = 0, SwapEmpty, SwapFull, StandbyReset };
+
+static FollowRecoverState followRecoverState = FollowRecoverState::Idle;
+static uint32_t followRecoverStateMs = 0;
+static uint32_t followGraceUntilMs = 0;
+static uint32_t followFailSinceMs = 0;
+static int16_t followActualW = 0;
+static bool followHaveActual = false;
+static bool followOk = true;
+static int16_t followErrorW = 0;
+static bool followGraceActive = false;
+static FollowRecovery followLastRecovery = FollowRecovery::None;
+static int16_t followPrevActualW = 0;
+static uint32_t followRecoverLastMs = 0;
+static uint32_t followRecoverWindowStartMs = 0;
+static uint8_t followRecoverWindowCount = 0;
+
 #if DUAL_BATT_ENABLE
 enum class DualBattState : uint8_t {
   Idle = 0,
@@ -84,6 +102,10 @@ static uint32_t dualBattLastSwitchMs = 0;
 static bool dualBattSelectedMatch = false;
 static uint8_t dualBattReportedSelected = 0; // from selector MQTT, 0=unknown
 static int16_t dualBattResumeCmdW = 0;
+static bool dualBattStickyEmptyA = false;
+static bool dualBattStickyEmptyB = false;
+static bool dualBattStickyFullA = false;
+static bool dualBattStickyFullB = false;
 #endif
 
 #if HA_MQTT_DISCOVERY
@@ -92,6 +114,27 @@ static bool haDiscoverySent = false;
 
 static void resetEssIntegral() {
   essIntegral = 0.0f;
+}
+
+static const char* followRecoveryName(FollowRecovery r) {
+  switch (r) {
+    case FollowRecovery::SwapEmpty:
+      return "swap_empty";
+    case FollowRecovery::SwapFull:
+      return "swap_full";
+    case FollowRecovery::StandbyReset:
+      return "standby_reset";
+    default:
+      return "none";
+  }
+}
+
+static void beginFollowGrace() {
+  followGraceUntilMs = millis() + uint32_t(FOLLOW_GRACE_MS);
+  followFailSinceMs = 0;
+  followGraceActive = true;
+  followOk = true;
+  followErrorW = 0;
 }
 
 static bool mqttPublish(const char* suffix, const String& payload, bool retain = false) {
@@ -425,20 +468,103 @@ static void dualBattBeginSwitch(uint8_t bank) {
   dualBattSetState(DualBattState::Standby);
 }
 
-static void dualBattRequestBank(uint8_t bank) {
+static bool dualBattRequestBank(uint8_t bank) {
   if (!dualBattEnabled && dualBattForce == 0) {
-    return;
+    return false;
   }
   if (bank == dualBattActive || bank == 0) {
-    return;
+    return false;
   }
   const uint32_t now = millis();
   if (dualBattLastSwitchMs != 0 && (now - dualBattLastSwitchMs) < DUAL_BATT_COOLDOWN_MS) {
     Log.printf("[dual] cooldown %lu ms left\n",
                static_cast<unsigned long>(DUAL_BATT_COOLDOWN_MS - (now - dualBattLastSwitchMs)));
-    return;
+    return false;
   }
   dualBattBeginSwitch(bank);
+  return true;
+}
+
+static bool dualBattBankEmpty(uint8_t bank) {
+  if (bank == 2) {
+    return dualBattStickyEmptyB || (dualBattSocBValid && dualBattSocB <= dualBattEmptySoc);
+  }
+  return dualBattStickyEmptyA || (dualBattSocAValid && dualBattSocA <= dualBattEmptySoc);
+}
+
+static bool dualBattBankFull(uint8_t bank) {
+  if (bank == 2) {
+    return dualBattStickyFullB || (dualBattSocBValid && dualBattSocB >= dualBattFullSoc);
+  }
+  return dualBattStickyFullA || (dualBattSocAValid && dualBattSocA >= dualBattFullSoc);
+}
+
+static bool dualBattBankKnown(uint8_t bank) {
+  return bank == 2 ? dualBattSocBValid : dualBattSocAValid;
+}
+
+static void dualBattMarkActiveEmpty() {
+  if (dualBattActive == 2) {
+    dualBattStickyEmptyB = true;
+    dualBattStickyFullB = false;
+  } else {
+    dualBattStickyEmptyA = true;
+    dualBattStickyFullA = false;
+  }
+  Log.printf("[dual] mark %s empty (sticky)\n", dualBattLabel(dualBattActive));
+}
+
+static void dualBattMarkActiveFull() {
+  if (dualBattActive == 2) {
+    dualBattStickyFullB = true;
+    dualBattStickyEmptyB = false;
+  } else {
+    dualBattStickyFullA = true;
+    dualBattStickyEmptyA = false;
+  }
+  Log.printf("[dual] mark %s full (sticky)\n", dualBattLabel(dualBattActive));
+}
+
+static void dualBattClearStickyOnFollow(int16_t cmdW, bool following) {
+  if (!following) {
+    return;
+  }
+  if (cmdW > int16_t(essHoldMinW)) {
+    if (dualBattActive == 2) {
+      dualBattStickyEmptyB = false;
+    } else {
+      dualBattStickyEmptyA = false;
+    }
+  } else if (cmdW < -int16_t(essHoldMinW)) {
+    if (dualBattActive == 2) {
+      dualBattStickyFullB = false;
+    } else {
+      dualBattStickyFullA = false;
+    }
+  }
+}
+
+static bool dualBattActiveStickyEmpty() {
+  return dualBattActive == 2 ? dualBattStickyEmptyB : dualBattStickyEmptyA;
+}
+
+static bool dualBattActiveStickyFull() {
+  return dualBattActive == 2 ? dualBattStickyFullB : dualBattStickyFullA;
+}
+
+static bool dualBattTrySwapOther(bool forEmpty) {
+  if (!dualBattEnabled || dualBattForce != 0 || dualBattBusy()) {
+    return false;
+  }
+  const uint8_t other = (dualBattActive == 2) ? 1 : 2;
+  if (forEmpty) {
+    if (dualBattBankKnown(other) && dualBattBankEmpty(other)) {
+      return false;
+    }
+  } else if (dualBattBankKnown(other) && dualBattBankFull(other)) {
+    return false;
+  }
+  return dualBattRequestBank(other);
 }
 
 static void dualBattEvaluatePolicy() {
@@ -461,32 +587,27 @@ static void dualBattEvaluatePolicy() {
     return;
   }
 
-  const bool aKnown = dualBattSocAValid;
-  const bool bKnown = dualBattSocBValid;
-  const bool aEmpty = aKnown && dualBattSocA <= dualBattEmptySoc;
-  const bool bEmpty = bKnown && dualBattSocB <= dualBattEmptySoc;
-  const bool aFull = aKnown && dualBattSocA >= dualBattFullSoc;
-  const bool bFull = bKnown && dualBattSocB >= dualBattFullSoc;
-
+  const bool aEmpty = dualBattBankEmpty(1);
+  const bool bEmpty = dualBattBankEmpty(2);
+  const bool aFull = dualBattBankFull(1);
+  const bool bFull = dualBattBankFull(2);
   if (wantDischarge) {
     if (dualBattActive == 1) {
-      // A empty → try B unless we know B is also empty.
-      if (aEmpty && (!bKnown || !bEmpty)) {
+      if (aEmpty && !bEmpty) {
         dualBattRequestBank(2);
       }
     } else {
-      // Prefer A whenever it may still have energy.
-      if (!aKnown || !aEmpty) {
+      if (!aEmpty) {
         dualBattRequestBank(1);
       }
     }
   } else if (wantCharge) {
     if (dualBattActive == 1) {
-      if (aFull && (!bKnown || !bFull)) {
+      if (aFull && !bFull) {
         dualBattRequestBank(2);
       }
     } else {
-      if (!aKnown || !aFull) {
+      if (!aFull) {
         dualBattRequestBank(1);
       }
     }
@@ -505,6 +626,7 @@ static void dualBattTick() {
       if (sofarStandby()) {
         lastCmdW = 0;
         lastCmdMs = now;
+        beginFollowGrace();
         mqttPublish("ess/mode", modeName(SofarMode::Standby));
         dualBattSetState(DualBattState::CommandRelay);
       } else if (now - dualBattStateMs > 5000) {
@@ -576,6 +698,7 @@ static void dualBattTick() {
           lastCmdMs = now;
         }
         dualBattResumeCmdW = 0;
+        beginFollowGrace();
         Log.printf("[dual] synced %s SOC=%u\n",
                    dualBattLabel(dualBattActive),
                    unsigned(lastSofar.batterySoc));
@@ -629,6 +752,7 @@ static void checkChargeTargetSoc() {
   if (sofarStandby()) {
     lastCmdW = 0;
     lastCmdMs = millis();
+    beginFollowGrace();
     chargeTargetSoc = 0;
     publishChargeTargetSoc();
     Log.printf("[charge] target SOC %u reached (effective %.1f%%) — standby\n",
@@ -660,6 +784,8 @@ static const HaSensor kHaSensors[] = {
     {"battery_voltage", "Battery Voltage", "{{ value_json.battery_voltage_v }}", "V", "voltage", "measurement"},
     {"battery_current", "Battery Current", "{{ value_json.battery_current_a }}", "A", "current", "measurement"},
     {"ess_command", "ESS Command", "{{ value_json.ess_command_w }}", "W", "power", "measurement"},
+    {"follow_error", "Follow Error", "{{ value_json.follow_error_w }}", "W", "power", "measurement"},
+    {"follow_recovery", "Follow Recovery", "{{ value_json.follow_recovery }}", nullptr, nullptr, nullptr},
     {"battery_soc", "Battery SOC", "{{ value_json.battery_soc }}", "%", "battery", "measurement"},
     {"battery_a_soc", "Battery A SOC", "{{ value_json.battery_a_soc }}", "%", "battery", "measurement"},
     {"battery_b_soc", "Battery B SOC", "{{ value_json.battery_b_soc }}", "%", "battery", "measurement"},
@@ -790,6 +916,46 @@ static void publishHaDiscovery() {
     String payload;
     serializeJson(doc, payload);
     haPublishConfig("binary_sensor", "sofar_fault_active", payload);
+  }
+
+  {
+    JsonDocument doc;
+    doc["name"] = "ESS Follow OK";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_follow_ok", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = stateTopic;
+    doc["value_template"] = "{{ value_json.follow_ok }}";
+    doc["payload_on"] = "true";
+    doc["payload_off"] = "false";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("binary_sensor", "follow_ok", payload);
+  }
+
+  {
+    JsonDocument doc;
+    doc["name"] = "ESS Follow Grace";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_follow_grace", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = stateTopic;
+    doc["value_template"] = "{{ value_json.follow_grace }}";
+    doc["payload_on"] = "true";
+    doc["payload_off"] = "false";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("binary_sensor", "follow_grace", payload);
   }
 
   // ESS enable switch (state from dedicated topic — string true/false)
@@ -1053,8 +1219,274 @@ static void publishHaDiscovery() {
 }
 #endif // HA_MQTT_DISCOVERY
 
+static bool followReadActual(int16_t& actual) {
+  const uint32_t now = millis();
+  if (lastSofar.batteryDcValid && lastSofar.batteryDcMs != 0 &&
+      (now - lastSofar.batteryDcMs) <= uint32_t(FOLLOW_ACTUAL_STALE_MS)) {
+    actual = lastSofar.batteryDcPowerW;
+    return true;
+  }
+  if (lastSofar.chargeDischargeMs != 0 &&
+      (now - lastSofar.chargeDischargeMs) <= uint32_t(FOLLOW_ACTUAL_STALE_MS)) {
+    actual = lastSofar.chargeDischargePowerW;
+    return true;
+  }
+  return false;
+}
+
+static bool followIsRamping(int16_t cmd, int16_t actual) {
+  if ((cmd > 0 && actual <= 0) || (cmd < 0 && actual >= 0)) {
+    return false;
+  }
+  return abs(int(actual)) >= abs(int(followPrevActualW)) + FOLLOW_RAMP_STEP_W;
+}
+
+static bool followNotFollowing(int16_t cmd, int16_t actual) {
+  const int absCmd = abs(int(cmd));
+  int thresh = int(FOLLOW_RATIO * float(absCmd));
+  if (thresh < FOLLOW_ACTUAL_FLOOR_W) {
+    thresh = FOLLOW_ACTUAL_FLOOR_W;
+  }
+  const bool sameDir = (cmd > 0 && actual > 0) || (cmd < 0 && actual < 0);
+  if (!sameDir) {
+    return true;
+  }
+  if (abs(int(actual)) < thresh) {
+    return !followIsRamping(cmd, actual);
+  }
+  return false;
+}
+
+static bool followRunStateRamping() {
+  if (!lastSofarOk) {
+    return false;
+  }
+  const uint16_t rs = lastSofar.runState;
+  return rs == 0 || rs == 1 || rs == 3;
+}
+
+static bool followRecoverAllowed() {
+  const uint32_t now = millis();
+  if (followRecoverLastMs != 0 &&
+      (now - followRecoverLastMs) < uint32_t(FOLLOW_RECOVER_COOLDOWN_MS)) {
+    Log.printf("[follow] recover cooldown %lu ms left\n",
+               static_cast<unsigned long>(FOLLOW_RECOVER_COOLDOWN_MS -
+                                          (now - followRecoverLastMs)));
+    return false;
+  }
+  if (followRecoverWindowStartMs == 0 ||
+      (now - followRecoverWindowStartMs) >= uint32_t(FOLLOW_RECOVER_WINDOW_MS)) {
+    followRecoverWindowStartMs = now;
+    followRecoverWindowCount = 0;
+  }
+  if (followRecoverWindowCount >= FOLLOW_RECOVER_MAX) {
+    Log.println("[follow] recover cap reached");
+    return false;
+  }
+  return true;
+}
+
+static void followStartStandbyRecover() {
+  if (!essEnabled || followRecoverState != FollowRecoverState::Idle) {
+    return;
+  }
+#if DUAL_BATT_ENABLE
+  if (dualBattBusy()) {
+    return;
+  }
+#endif
+  if (!followRecoverAllowed()) {
+    return;
+  }
+  followRecoverWindowCount++;
+  followRecoverLastMs = millis();
+  followLastRecovery = FollowRecovery::StandbyReset;
+  resetEssIntegral();
+  lastCmdW = 0;
+  followFailSinceMs = 0;
+  followRecoverState = FollowRecoverState::Standby;
+  followRecoverStateMs = millis();
+  Log.println("[follow] standby recover");
+  mqttPublish("ess/follow_recovery", followRecoveryName(followLastRecovery));
+}
+
+static void followHandleLimit(bool empty) {
+  followFailSinceMs = 0;
+#if DUAL_BATT_ENABLE
+  if (empty) {
+    dualBattMarkActiveEmpty();
+    followLastRecovery = FollowRecovery::SwapEmpty;
+  } else {
+    dualBattMarkActiveFull();
+    followLastRecovery = FollowRecovery::SwapFull;
+  }
+  mqttPublish("ess/follow_recovery", followRecoveryName(followLastRecovery));
+  if (dualBattTrySwapOther(empty)) {
+    Log.printf("[follow] swap for BMS %s\n", empty ? "empty" : "full");
+    return;
+  }
+  Log.printf("[follow] BMS %s — no other bank to swap\n", empty ? "empty" : "full");
+#else
+  (void)empty;
+#endif
+}
+
+static void followRecoverTick() {
+  const uint32_t now = millis();
+  switch (followRecoverState) {
+    case FollowRecoverState::Idle:
+      break;
+    case FollowRecoverState::Standby:
+      if (sofarStandby()) {
+        lastCmdW = 0;
+        lastCmdMs = now;
+        beginFollowGrace();
+        mqttPublish("ess/mode", modeName(SofarMode::Standby));
+        followRecoverState = FollowRecoverState::Hold;
+        followRecoverStateMs = now;
+      } else if (now - followRecoverStateMs > 5000) {
+        Log.println("[follow] recover standby timeout");
+        followRecoverState = FollowRecoverState::Idle;
+      }
+      break;
+    case FollowRecoverState::Hold:
+      if (now - followRecoverStateMs >= uint32_t(FOLLOW_RECOVER_HOLD_MS)) {
+        followRecoverState = FollowRecoverState::Idle;
+        beginFollowGrace();
+        Log.println("[follow] recover resume ESS");
+      }
+      break;
+  }
+}
+
+static void followTick() {
+  const uint32_t now = millis();
+  followGraceActive = followGraceUntilMs != 0 && int32_t(now - followGraceUntilMs) < 0;
+  if (!followGraceActive) {
+    followGraceUntilMs = 0;
+  }
+
+#if DUAL_BATT_ENABLE
+  if (dualBattBusy()) {
+    followOk = true;
+    followErrorW = 0;
+    followFailSinceMs = 0;
+    return;
+  }
+#endif
+  if (followRecoverState != FollowRecoverState::Idle) {
+    followOk = true;
+    followErrorW = 0;
+    return;
+  }
+
+  int16_t actual = 0;
+  followHaveActual = followReadActual(actual);
+  if (followHaveActual) {
+    followActualW = actual;
+  }
+
+  const int16_t cmd = lastCmdW;
+  const bool wantDischarge = cmd > int16_t(essHoldMinW);
+  const bool wantCharge = cmd < -int16_t(essHoldMinW);
+  const bool cmdLarge = abs(int(cmd)) >= FOLLOW_MIN_CMD_W;
+
+  if (followGraceActive) {
+    followOk = true;
+    followErrorW = 0;
+    followFailSinceMs = 0;
+    if (followHaveActual) {
+      followPrevActualW = actual;
+    }
+    return;
+  }
+
+  if (wantCharge && sofarChargeProhibited()) {
+#if DUAL_BATT_ENABLE
+    if (!dualBattActiveStickyFull()) {
+      followHandleLimit(false);
+    }
+#else
+    followHandleLimit(false);
+#endif
+    if (followHaveActual) {
+      followPrevActualW = actual;
+    }
+    return;
+  }
+  if (wantDischarge && sofarDischargeProhibited()) {
+#if DUAL_BATT_ENABLE
+    if (!dualBattActiveStickyEmpty()) {
+      followHandleLimit(true);
+    }
+#else
+    followHandleLimit(true);
+#endif
+    if (followHaveActual) {
+      followPrevActualW = actual;
+    }
+    return;
+  }
+
+  if (!cmdLarge || followRunStateRamping() || !lastSofarOk || !followHaveActual) {
+    followOk = true;
+    followErrorW = 0;
+    followFailSinceMs = 0;
+    if (followHaveActual) {
+      followPrevActualW = actual;
+    }
+    return;
+  }
+
+  followErrorW = int16_t(int(cmd) - int(actual));
+  const bool notFollow = followNotFollowing(cmd, actual);
+  followOk = !notFollow;
+
+  if (!notFollow) {
+    followFailSinceMs = 0;
+#if DUAL_BATT_ENABLE
+    dualBattClearStickyOnFollow(cmd, true);
+#endif
+    followPrevActualW = actual;
+    return;
+  }
+
+  const bool socOk = lastSofar.socValid;
+  const uint8_t soc = socOk ? uint8_t(lastSofar.batterySoc) : 0;
+
+  if (followFailSinceMs == 0) {
+    followFailSinceMs = now;
+  }
+
+  followPrevActualW = actual;
+
+  if ((now - followFailSinceMs) < uint32_t(FOLLOW_CONFIRM_MS)) {
+    return;
+  }
+
+  followFailSinceMs = 0;
+  Log.printf("[follow] mismatch cmd=%d actual=%d soc=%u\n",
+             int(cmd),
+             int(actual),
+             unsigned(socOk ? soc : 255));
+
+  if (wantCharge && (sofarChargeProhibited() || (socOk && soc >= FOLLOW_FULL_SOC))) {
+    followHandleLimit(false);
+    return;
+  }
+  if (wantDischarge && (sofarDischargeProhibited() || (socOk && soc <= FOLLOW_EMPTY_SOC))) {
+    followHandleLimit(true);
+    return;
+  }
+
+  followStartStandbyRecover();
+}
+
 static void applyEss(float gridPowerW) {
   lastGridPowerW = gridPowerW;
+  if (followRecoverState != FollowRecoverState::Idle) {
+    return;
+  }
 #if DUAL_BATT_ENABLE
   if (dualBattBusy()) {
     return; // bank switch owns Sofar commands
@@ -1450,6 +1882,9 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     chargeTargetSoc = 0;
     publishChargeTargetSoc();
     handled = sofarStandby();
+    if (handled) {
+      beginFollowGrace();
+    }
   } else if (cmd == "auto") {
     essEnabled = false;
     resetEssIntegral();
@@ -1618,6 +2053,26 @@ static void publishState() {
   json += String(essHoldMinW);
   json += ",\"ess_integral\":";
   json += String(essIntegral, 1);
+  json += ",\"follow_ok\":";
+  json += followOk ? "true" : "false";
+  json += ",\"follow_error_w\":";
+  json += String(followErrorW);
+  json += ",\"follow_grace\":";
+  json += followGraceActive ? "true" : "false";
+  json += ",\"follow_recovery\":\"";
+  json += followRecoveryName(followLastRecovery);
+  json += "\",\"passive_status\":";
+  json += sofarPassiveStatusValid() ? String(sofarLastPassiveStatus()) : String("null");
+  json += ",\"passive_result\":";
+  json += sofarPassiveStatusValid() ? String(sofarLastPassiveResult()) : String("null");
+  json += ",\"passive_charge_enabled\":";
+  json += (sofarPassiveStatusValid() && (sofarLastPassiveStatus() & 0x01)) ? "true" : "false";
+  json += ",\"passive_discharge_enabled\":";
+  json += (sofarPassiveStatusValid() && (sofarLastPassiveStatus() & 0x02)) ? "true" : "false";
+  json += ",\"passive_charge_prohibited\":";
+  json += sofarChargeProhibited() ? "true" : "false";
+  json += ",\"passive_discharge_prohibited\":";
+  json += sofarDischargeProhibited() ? "true" : "false";
   json += ",\"sofar_mode\":\"";
   json += modeName(sofarLastMode());
   json += "\",\"charge_target_soc\":";
@@ -1858,6 +2313,7 @@ void setup() {
   sofarHeartbeat();
   if (essEnabled) {
     sofarStandby();
+    beginFollowGrace();
   } else {
     sofarAuto();
   }
@@ -1895,6 +2351,7 @@ void loop() {
 
   if (now - lastEssMs >= ESS_LOOP_INTERVAL_MS) {
     lastEssMs = now;
+    followRecoverTick();
     const Load2Snapshot snap = captureLoad2();
     if (snap.connected) {
       lastGridPowerW = snap.activePower;
@@ -1937,6 +2394,7 @@ void loop() {
 #if DUAL_BATT_ENABLE
     }
 #endif
+    followTick();
   }
 
   if (now - lastMqttStateMs >= MQTT_STATE_INTERVAL_MS) {
