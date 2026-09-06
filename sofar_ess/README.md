@@ -20,7 +20,7 @@ Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator fr
 
 **Battery metering:** Sofar `0x020D` is published as **charge/discharge power** (register name). Prefer **battery DC power** = V×I from `0x020E`/`0x020F` for load math — AC-coupled Hoymiles charge is under-reported by `0x020D`. Site solar totals sum Hoymiles 1600 + 800 + Sofar DC PV strings.
 
-**Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). Force a bank via `set/battery`. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle (`DUAL_BATT_SETTLE_MS`, 15 s) → invalidate SOC → re-poll until confirmed.
+**Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). A pack also counts as full once high-SOC protect latches on it, or once it stops accepting more than `FOLLOW_TAPER_MIN_W` (150 W) of a much larger charge command — tapering to a lower power near the top is normal charging and does not hand over. Force a bank via `set/battery`. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle (`DUAL_BATT_SETTLE_MS`, 15 s) → invalidate SOC → re-poll until confirmed.
 
 **SOC validation** (why a bank switch no longer reports a bogus SOC): a mis-paired Modbus reply is indistinguishable from a real register value, so SOC is filtered three ways.
 

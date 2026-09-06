@@ -402,53 +402,41 @@ views:
         type: grid
         cards:
           - type: entity
-            entity: sensor.sofar_ess_grid_power
-            name: Grid
-          - type: entity
-            entity: sensor.opendtu_60d84c_ac_power
-            name: Solar 1600
-          - type: entity
-            entity: sensor.home_pv_power
-            name: Solar 800
-          - type: entity
-            entity: sensor.sofar_ess_pv1_power
-            name: Sofar PV1
-          - type: entity
-            entity: sensor.sofar_ess_pv2_power
-            name: Sofar PV2
-          - type: entity
-            entity: sensor.sofar_ess_sofar_pv_total
-            name: Sofar PV
+            entity: sensor.house_load_power
+            name: Load
           - type: entity
             entity: sensor.site_solar_total_power
             name: Solar Total
           - type: entity
-            entity: sensor.house_load_power
-            name: Load
+            entity: sensor.sofar_ess_grid_power
+            name: Grid
+          - type: entity
+            entity: sensor.hms_1600_4t_power
+            name: Solar new panels
+          - type: entity
+            entity: sensor.hms_1600_4t_old_panels_power
+            name: Solar old panels
+          - type: entity
+            entity: sensor.hms_1600_4t_conservatory_power
+            name: Solar conservatory
           - type: entity
             entity: sensor.sofar_ess_battery_dc_power
             name: Battery DC
           - type: entity
-            entity: sensor.sofar_ess_charge_discharge_power
-            name: Chg/Dchg pwr
-          - type: entity
             entity: sensor.sofar_ess_battery_combined_soc
             name: Combined SOC
           - type: entity
-            entity: sensor.sofar_ess_battery_active
-            name: Active bank
-          - type: entity
             entity: sensor.sofar_ess_ess_command
             name: Command
+          - type: entity
+            entity: sensor.sofar_ess_battery_active
+            name: Active bank
           - type: entity
             entity: sensor.sofar_ess_sofar_mode
             name: Mode
           - type: entity
             entity: sensor.smart_charge_status
             name: Smart charge
-          - type: entity
-            entity: binary_sensor.sofar_ess_ess_soc_full_active
-            name: SOC full
         columns: 2
       - type: history-graph
         title: Power (1 h)
@@ -468,6 +456,24 @@ views:
             name: Load
           - entity: sensor.sofar_ess_battery_dc_power
             name: Battery DC
+      - type: entities
+        title: Today
+        show_header_toggle: false
+        entities:
+          - entity: sensor.site_solar_today_wh
+            name: Site solar today
+          - entity: sensor.house_load_energy_daily
+            name: House load today
+          - entity: sensor.hms_1600_4t_yieldday
+            name: Solar new panels
+          - entity: sensor.hms_1600_4t_old_panels_yieldday
+            name: Solar old panels
+          - entity: sensor.hms_1600_4t_conservatory_yieldday
+            name: Solar conservatory
+          - entity: sensor.grid_energy_imported_daily
+            name: Grid import
+          - entity: sensor.grid_energy_exported_daily
+            name: Grid export
       - type: history-graph
         title: Battery SOC (24 h)
         hours_to_show: 24
@@ -478,28 +484,6 @@ views:
             name: Battery A (10 kWh)
           - entity: sensor.sofar_ess_battery_b_soc
             name: Battery B (5 kWh)
-      - type: entities
-        title: Sofar PV
-        show_header_toggle: false
-        entities:
-          - entity: sensor.sofar_ess_sofar_pv_total
-            name: Sofar PV total
-          - entity: sensor.sofar_ess_sofar_pv_today
-            name: Sofar PV today
-          - type: divider
-          - entity: sensor.sofar_ess_pv1_power
-            name: PV1 power
-          - entity: sensor.sofar_ess_pv1_voltage
-            name: PV1 voltage
-          - entity: sensor.sofar_ess_pv1_current
-            name: PV1 current
-          - type: divider
-          - entity: sensor.sofar_ess_pv2_power
-            name: PV2 power
-          - entity: sensor.sofar_ess_pv2_voltage
-            name: PV2 voltage
-          - entity: sensor.sofar_ess_pv2_current
-            name: PV2 current
       - type: entities
         title: Dual battery
         show_header_toggle: false
@@ -526,47 +510,26 @@ views:
             name: Empty threshold
           - entity: number.sofar_ess_battery_full_soc
             name: Full threshold
-      - type: entities
-        title: Inverter
-        show_header_toggle: false
+      - type: history-graph
+        title: Power (24 h)
+        hours_to_show: 24
         entities:
-          - entity: switch.sofar_ess_ess_enabled
-            name: ESS enabled
-          - entity: switch.sofar_ess_ess_charge_only
-            name: Charge only (excess)
-          - type: divider
-          - entity: switch.sofar_ess_ess_soc_protect
-            name: SOC protect
-          - entity: binary_sensor.sofar_ess_ess_soc_protect_active
-            name: SOC protect active (low)
-          - entity: binary_sensor.sofar_ess_ess_soc_full_active
-            name: SOC full active (high)
-          - entity: number.sofar_ess_ess_soc_protect_low
-            name: SOC protect low (%)
-          - entity: number.sofar_ess_ess_soc_protect_hysteresis
-            name: SOC protect low hysteresis (%)
-          - entity: number.sofar_ess_ess_soc_protect_high
-            name: SOC protect high (%)
-          - entity: number.sofar_ess_ess_soc_protect_high_hysteresis
-            name: SOC protect high hysteresis (%)
-          - type: divider
-          - entity: number.sofar_ess_ess_kp
-            name: Kp
-          - entity: number.sofar_ess_ess_ki
-            name: Ki
-          - entity: number.sofar_ess_ess_deadband
-            name: Deadband (W)
-          - entity: number.sofar_ess_ess_min_delta
-            name: Min delta (W)
-          - entity: number.sofar_ess_ess_hold_min
-            name: Near-zero hold (W)
-          - type: divider
-          - entity: button.sofar_ess_standby
-            name: Standby
-          - entity: button.sofar_ess_auto
-            name: Auto
-          - entity: button.sofar_ess_reset_integral
-            name: Reset integral
+          - entity: sensor.site_solar_total_power
+            name: Solar Total
+          - entity: sensor.opendtu_60d84c_ac_power
+            name: Solar 1600
+          - entity: sensor.home_pv_power
+            name: Solar 800
+          - entity: sensor.sofar_ess_sofar_pv_total
+            name: Sofar PV
+          - entity: sensor.sofar_ess_grid_power
+            name: Grid
+          - entity: sensor.house_load_power
+            name: Load
+          - entity: sensor.sofar_ess_battery_dc_power
+            name: Battery DC
+          - entity: sensor.sofar_ess_charge_discharge_power
+            name: Chg/Dchg
       - type: entities
         title: Smart overnight charge (00:30–05:30 @ 9.5p)
         show_header_toggle: false
@@ -610,48 +573,6 @@ views:
             name: Recalculate / apply now
           - entity: script.smart_charge_stop_and_restore_ess
             name: Stop & restore full ESS
-      - type: entities
-        title: Today
-        show_header_toggle: false
-        entities:
-          - entity: sensor.site_solar_today_kwh
-            name: Site solar today
-          - entity: sensor.house_load_energy_daily
-            name: House load today
-          - entity: sensor.opendtu_60d84c_yield_day
-            name: Solar 1600 yield
-          - entity: sensor.home_today_s_energy
-            name: Solar 800 yield
-          - entity: sensor.sofar_ess_sofar_pv_today
-            name: Sofar PV yield
-          - entity: sensor.grid_energy_imported_daily
-            name: Grid import
-          - entity: sensor.grid_energy_exported_daily
-            name: Grid export
-          - entity: sensor.hms_1600_4t_temperature
-            name: Inverter temp
-          - entity: sensor.opendtu_60d84c_yield_total
-            name: Solar 1600 lifetime
-      - type: history-graph
-        title: Power (24 h)
-        hours_to_show: 24
-        entities:
-          - entity: sensor.site_solar_total_power
-            name: Solar Total
-          - entity: sensor.opendtu_60d84c_ac_power
-            name: Solar 1600
-          - entity: sensor.home_pv_power
-            name: Solar 800
-          - entity: sensor.sofar_ess_sofar_pv_total
-            name: Sofar PV
-          - entity: sensor.sofar_ess_grid_power
-            name: Grid
-          - entity: sensor.house_load_power
-            name: Load
-          - entity: sensor.sofar_ess_battery_dc_power
-            name: Battery DC
-          - entity: sensor.sofar_ess_charge_discharge_power
-            name: Chg/Dchg
       - type: statistics-graph
         title: Hourly averages (24 h)
         days_to_show: 1
@@ -672,6 +593,69 @@ views:
             name: Grid
           - entity: sensor.house_load_power
             name: Load
+      - type: entities
+        title: Sofar PV
+        show_header_toggle: false
+        entities:
+          - entity: sensor.sofar_ess_sofar_pv_total
+            name: Sofar PV total
+          - entity: sensor.sofar_ess_sofar_pv_today
+            name: Sofar PV today
+          - type: divider
+          - entity: sensor.sofar_ess_pv1_power
+            name: PV1 power
+          - entity: sensor.sofar_ess_pv1_voltage
+            name: PV1 voltage
+          - entity: sensor.sofar_ess_pv1_current
+            name: PV1 current
+          - type: divider
+          - entity: sensor.sofar_ess_pv2_power
+            name: PV2 power
+          - entity: sensor.sofar_ess_pv2_voltage
+            name: PV2 voltage
+          - entity: sensor.sofar_ess_pv2_current
+            name: PV2 current
+      - type: entities
+        title: Inverter
+        show_header_toggle: false
+        entities:
+          - entity: switch.sofar_ess_ess_enabled
+            name: ESS enabled
+          - entity: switch.sofar_ess_ess_charge_only
+            name: Charge only (excess)
+          - type: divider
+          - entity: switch.sofar_ess_ess_soc_protect
+            name: SOC protect
+          - entity: binary_sensor.sofar_ess_ess_soc_protect_active
+            name: SOC protect active (low)
+          - entity: binary_sensor.sofar_ess_ess_soc_full_active
+            name: SOC full active (high)
+          - entity: number.sofar_ess_ess_soc_protect_low
+            name: SOC protect low (%)
+          - entity: number.sofar_ess_ess_soc_protect_hysteresis
+            name: SOC protect low hysteresis (%)
+          - entity: number.sofar_ess_ess_soc_protect_high
+            name: SOC protect high (%)
+          - entity: number.sofar_ess_ess_soc_protect_high_hysteresis
+            name: SOC protect high hysteresis (%)
+          - type: divider
+          - entity: number.sofar_ess_ess_kp
+            name: Kp
+          - entity: number.sofar_ess_ess_ki
+            name: Ki
+          - entity: number.sofar_ess_ess_deadband
+            name: Deadband (W)
+          - entity: number.sofar_ess_ess_min_delta
+            name: Min delta (W)
+          - entity: number.sofar_ess_ess_hold_min
+            name: Near-zero hold (W)
+          - type: divider
+          - entity: button.sofar_ess_standby
+            name: Standby
+          - entity: button.sofar_ess_auto
+            name: Auto
+          - entity: button.sofar_ess_reset_integral
+            name: Reset integral
   - title: Cameras
     path: cameras
     cards:
@@ -736,6 +720,10 @@ views:
           - switch.windowamelie_2
         title: Window Amelie
         show_header_toggle: false
+      - type: tile
+        entity: switch.gas_switch
+        features:
+          - type: toggle
       - type: grid
         square: false
         columns: 1

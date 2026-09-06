@@ -55,6 +55,7 @@ static uint32_t lastHeartbeatMs = 0;
 static uint32_t lastMqttStateMs = 0;
 static uint32_t lastCmdMs = 0;
 static int16_t lastCmdW = 0; // +discharge, -charge, 0=standby
+static uint32_t essChargeBlockedFullMs = 0; // last charge suppressed by full protect
 static uint8_t chargeTargetSoc = 0; // 0 = no limit; manual charge stops at target → standby
 
 enum class FollowRecoverState : uint8_t { Idle = 0, Standby, Hold };
@@ -180,6 +181,10 @@ static void publishEssParams() {
   publishSocProtectParams();
 }
 
+#if DUAL_BATT_ENABLE
+static void dualBattMarkActiveFull();
+#endif
+
 // Bidirectional ESS → charge-only when SOC drops; no-charge when SOC is full.
 static void updateEssSocProtect() {
   if (!essSocProtectEnabled || !essEnabled) {
@@ -230,9 +235,15 @@ static void updateEssSocProtect() {
       essIntegral = 0.0f;
     }
     Log.printf("[ess] SOC %u >= %u — full protect (no charge)\n", soc, essSocProtectHigh);
+#if DUAL_BATT_ENABLE
+    // The latch holds while SOC sags back below the threshold, so remember
+    // which pack is full — otherwise the handover policy stops seeing it.
+    dualBattMarkActiveFull();
+#endif
     publishSocProtectParams();
   } else if (essSocFullActive && int(soc) <= resumeHighAt) {
     essSocFullActive = false;
+    essChargeBlockedFullMs = 0;
     Log.printf("[ess] SOC %u <= %d — charge allowed again\n", soc, resumeHighAt);
     publishSocProtectParams();
   }
@@ -581,8 +592,14 @@ static void dualBattEvaluatePolicy() {
   }
 
   // Intent from last ESS/manual command. Near-zero hold does not switch banks.
+  // Full protect replaces the charge command with a discharge hold, so a charge
+  // it just suppressed still counts as intent — that is when the other bank is
+  // needed most.
+  const bool chargeBlockedFull =
+      essChargeBlockedFullMs != 0 &&
+      (millis() - essChargeBlockedFullMs) < uint32_t(DUAL_BATT_FULL_HANDOVER_MS);
   const bool wantDischarge = lastCmdW > int16_t(essHoldMinW);
-  const bool wantCharge = lastCmdW < -int16_t(essHoldMinW);
+  const bool wantCharge = lastCmdW < -int16_t(essHoldMinW) || (chargeBlockedFull && !wantDischarge);
   if (!wantDischarge && !wantCharge) {
     return;
   }
@@ -1247,6 +1264,11 @@ static bool followNotFollowing(int16_t cmd, int16_t actual) {
   if (thresh < FOLLOW_ACTUAL_FLOOR_W) {
     thresh = FOLLOW_ACTUAL_FLOOR_W;
   }
+  // A pack close to full takes less than commanded but keeps charging to a
+  // higher SOC. Only near-zero acceptance means it can no longer take charge.
+  if (cmd < 0 && thresh > FOLLOW_TAPER_MIN_W) {
+    thresh = FOLLOW_TAPER_MIN_W;
+  }
   const bool sameDir = (cmd > 0 && actual > 0) || (cmd < 0 && actual < 0);
   if (!sameDir) {
     return true;
@@ -1405,6 +1427,8 @@ static void followTick() {
 #if DUAL_BATT_ENABLE
     if (!dualBattActiveStickyFull()) {
       followHandleLimit(false);
+    } else {
+      dualBattTrySwapOther(false); // already marked full — keep retrying handover
     }
 #else
     followHandleLimit(false);
@@ -1418,6 +1442,8 @@ static void followTick() {
 #if DUAL_BATT_ENABLE
     if (!dualBattActiveStickyEmpty()) {
       followHandleLimit(true);
+    } else {
+      dualBattTrySwapOther(true); // already marked empty — keep retrying handover
     }
 #else
     followHandleLimit(true);
@@ -1536,6 +1562,11 @@ static void applyEss(float gridPowerW) {
   }
 
   float u = essKp * e + essKi * essIntegral;
+  if (noCharge && u < -essDeadbandW) {
+    // Export the pack could soak if it were not full — dual-battery handover
+    // reads this as charge intent.
+    essChargeBlockedFullMs = nowPi;
+  }
   if (u > uMax) {
     u = uMax;
   } else if (u < uMin) {

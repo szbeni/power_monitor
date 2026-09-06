@@ -132,6 +132,11 @@
 #ifndef DUAL_BATT_FULL_SOC
 #define DUAL_BATT_FULL_SOC 98
 #endif
+// Full protect zeroes the charge command, so the charge intent that justifies a
+// handover disappears. Treat a charge suppressed this recently as intent (ms).
+#ifndef DUAL_BATT_FULL_HANDOVER_MS
+#define DUAL_BATT_FULL_HANDOVER_MS 10000
+#endif
 // Contactor + BMS handover time before the inverter reports the new pack.
 #ifndef DUAL_BATT_SETTLE_MS
 #define DUAL_BATT_SETTLE_MS 15000
@@ -191,6 +196,12 @@
 #endif
 #ifndef FOLLOW_RATIO
 #define FOLLOW_RATIO 0.25f
+#endif
+// A nearly full pack tapers: it accepts less than commanded but is still
+// charging. Charging counts as following down to this power, so a taper is
+// never mistaken for a full/faulty pack.
+#ifndef FOLLOW_TAPER_MIN_W
+#define FOLLOW_TAPER_MIN_W 150
 #endif
 #ifndef FOLLOW_CONFIRM_MS
 #define FOLLOW_CONFIRM_MS 25000
