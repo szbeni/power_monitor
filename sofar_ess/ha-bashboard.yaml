@@ -3,7 +3,7 @@ views:
   - title: Floorplan
     path: floorplan
     panel: true
-    theme: ""
+    theme: ''
     badges: []
     cards:
       - type: vertical-stack
@@ -12,7 +12,7 @@ views:
             image: local/floorplan/hendravean/ground_floor.png
             elements:
               - type: state-badge
-                title: ""
+                title: ''
                 entity: sensor.trv_conservatory_temperature
                 tap_action:
                   action: navigate
@@ -24,7 +24,7 @@ views:
                   font-size: 17px
                   transform: translate(-50%,-50%) scale(0.7,0.7)
               - type: state-badge
-                title: ""
+                title: ''
                 entity: sensor.trv_kitchen_temperature
                 tap_action:
                   action: navigate
@@ -45,8 +45,8 @@ views:
                 style:
                   top: 65%
                   left: 73%
-                  "--iron-icon-height": 42px
-                  "--iron-icon-width": 42px
+                  --iron-icon-height: 42px
+                  --iron-icon-width: 42px
               - type: state-icon
                 entity: light.light_livingroom
                 title: Living room light
@@ -57,10 +57,10 @@ views:
                 style:
                   top: 80%
                   left: 73%
-                  "--iron-icon-height": 42px
-                  "--iron-icon-width": 42px
+                  --iron-icon-height: 42px
+                  --iron-icon-width: 42px
               - type: state-badge
-                title: ""
+                title: ''
                 entity: sensor.tasmotatempsensorlivingroom_bme280_temperature
                 tap_action:
                   action: navigate
@@ -82,8 +82,8 @@ views:
                 style:
                   top: 65%
                   left: 38%
-                  "--iron-icon-height": 42px
-                  "--iron-icon-width": 42px
+                  --iron-icon-height: 42px
+                  --iron-icon-width: 42px
               - type: state-icon
                 entity: switch.light_switch_dual_hall_stairs_left
                 icon: mdi:ceiling-light
@@ -95,8 +95,8 @@ views:
                 style:
                   top: 81%
                   left: 15%
-                  "--iron-icon-height": 42px
-                  "--iron-icon-width": 42px
+                  --iron-icon-height: 42px
+                  --iron-icon-width: 42px
               - type: state-icon
                 entity: light.light_stairs
                 title: Light Stairs
@@ -108,8 +108,8 @@ views:
                 style:
                   top: 90%
                   left: 40%
-                  "--iron-icon-height": 42px
-                  "--iron-icon-width": 42px
+                  --iron-icon-height: 42px
+                  --iron-icon-width: 42px
               - type: icon
                 title: Living room camera
                 icon: mdi:cctv
@@ -120,9 +120,9 @@ views:
                 style:
                   top: 98%
                   left: 18%
-                  "--iron-icon-fill-color": "#11AB7D"
-                  "--iron-icon-height": 40px
-                  "--iron-icon-width": 40px
+                  --iron-icon-fill-color: '#11AB7D'
+                  --iron-icon-height: 40px
+                  --iron-icon-width: 40px
           - type: picture-elements
             image: local/floorplan/hendravean/first_floor.png
             elements:
@@ -136,10 +136,10 @@ views:
                 style:
                   top: 25%
                   left: 33%
-                  "--iron-icon-height": 42px
-                  "--iron-icon-width": 42px
+                  --iron-icon-height: 42px
+                  --iron-icon-width: 42px
               - type: state-badge
-                title: ""
+                title: ''
                 entity: sensor.trv_master_bedroom_temperature
                 tap_action:
                   action: navigate
@@ -151,7 +151,7 @@ views:
                   font-size: 17px
                   transform: translate(-50%,-50%) scale(0.7,0.7)
               - type: state-badge
-                title: ""
+                title: ''
                 entity: sensor.trv_bathroom_temperature
                 tap_action:
                   action: navigate
@@ -163,7 +163,7 @@ views:
                   font-size: 17px
                   transform: translate(-50%,-50%) scale(0.7,0.7)
               - type: state-badge
-                title: ""
+                title: ''
                 entity: sensor.trv_bedroom_front_temperature
                 tap_action:
                   action: navigate
@@ -175,7 +175,7 @@ views:
                   font-size: 17px
                   transform: translate(-50%,-50%) scale(0.7,0.7)
               - type: state-badge
-                title: ""
+                title: ''
                 entity: sensor.trv_bedroom_rear_temperature
                 tap_action:
                   action: navigate
@@ -196,8 +196,8 @@ views:
                 style:
                   top: 28%
                   left: 75%
-                  "--iron-icon-height": 42px
-                  "--iron-icon-width": 42px
+                  --iron-icon-height: 42px
+                  --iron-icon-width: 42px
               - type: state-icon
                 entity: light.light_stairs
                 title: Light Stairs
@@ -209,8 +209,8 @@ views:
                 style:
                   top: 76%
                   left: 40%
-                  "--iron-icon-height": 42px
-                  "--iron-icon-width": 42px
+                  --iron-icon-height: 42px
+                  --iron-icon-width: 42px
               - type: icon
                 title: Driveway camera
                 icon: mdi:cctv
@@ -218,9 +218,9 @@ views:
                 style:
                   top: 100%
                   left: 90%
-                  "--iron-icon-fill-color": "#11AB7D"
-                  "--iron-icon-height": 40px
-                  "--iron-icon-width": 40px
+                  --iron-icon-fill-color: '#11AB7D'
+                  --iron-icon-height: 40px
+                  --iron-icon-width: 40px
   - title: Heating
     badges: []
     cards:
@@ -258,7 +258,7 @@ views:
           - entity: sensor.temp_sensor_masterbedroom_zigbee_humidity
         hours_to_show: 24
         refresh_interval: 1
-        title: "Bedroom "
+        title: 'Bedroom '
       - type: entities
         entities:
           - entity: switch.diesel_heater
@@ -277,7 +277,7 @@ views:
         name: Master Bedroom Temperature
       - type: thermostat
         entity: climate.trv_bedroom_rear_sonoff
-        name: "Amelie bedroom "
+        name: 'Amelie bedroom '
       - type: thermostat
         entity: climate.trv_conservatory_sonoff
         name: Conservatory Radiator
@@ -321,7 +321,7 @@ views:
             features:
               - type: climate-hvac-modes
                 hvac_modes:
-                  - "off"
+                  - 'off'
                   - cool
                   - heat
                   - dry
@@ -332,7 +332,7 @@ views:
             features:
               - type: climate-hvac-modes
                 hvac_modes:
-                  - "off"
+                  - 'off'
                   - cool
                   - heat
                   - dry
@@ -343,7 +343,7 @@ views:
             features:
               - type: climate-hvac-modes
                 hvac_modes:
-                  - "off"
+                  - 'off'
                   - cool
                   - heat
                   - dry
@@ -351,7 +351,7 @@ views:
                   - heat_cool
   - title: Lights
     path: lights
-    icon: ""
+    icon: ''
     badges: []
     cards:
       - type: light
@@ -656,6 +656,172 @@ views:
             name: Auto
           - entity: button.sofar_ess_reset_integral
             name: Reset integral
+      - type: custom:apexcharts-card
+        graph_span: 30d
+        span:
+          end: day
+        header:
+          show: true
+          title: Daily Home Energy Usage
+          show_states: true
+        series:
+          - entity: sensor.house_load_energy_daily
+            name: Daily Usage
+            type: column
+            statistics:
+              type: state
+              period: day
+            group_by:
+              func: max
+              duration: 1d
+            show:
+              extremas: true
+            color: '#3498db'
+      - type: custom:apexcharts-card
+        graph_span: 30d
+        span:
+          end: day
+        header:
+          show: true
+          title: Daily Grid Import/Export
+          show_states: true
+        series:
+          - entity: sensor.grid_energy_exported_daily
+            name: Grid Export
+            type: column
+            statistics:
+              type: state
+              period: day
+            group_by:
+              func: max
+              duration: 1d
+            show:
+              extremas: false
+            color: '#3498db'
+          - entity: sensor.grid_energy_imported_daily
+            name: Grid Import
+            type: column
+            statistics:
+              type: state
+              period: day
+            group_by:
+              func: max
+              duration: 1d
+            show:
+              extremas: false
+            color: '#FF6600'
+  - theme: Backend-selected
+    title: Power Flow
+    path: power-flow
+    panel: true
+    badges: []
+    cards:
+      - square: false
+        type: grid
+        cards:
+          - cardstyle: lite
+            wide: true
+            large_font: true
+            show_solar: true
+            show_battery: true
+            show_grid: true
+            center_no_grid: false
+            card_height: 100%
+            card_width: 100%
+            decimal_places: 2
+            decimal_places_energy: 1
+            dynamic_line_width: true
+            max_line_width: 5
+            min_line_width: 1
+            inverter:
+              modern: true
+              model: sofar
+              autarky: power
+              navigate: /home-mobile-view/energy
+            battery:
+              count: 2
+              energy: 10000
+              shutdown_soc: number.sofar_ess_battery_empty_soc
+              soc_end_of_charge: number.sofar_ess_battery_full_soc
+              max_power: 3000
+              show_remaining_energy: true
+              navigate: /home-mobile-view/energy
+            battery2:
+              energy: 5000
+              shutdown_soc: number.sofar_ess_battery_empty_soc
+              soc_end_of_charge: number.sofar_ess_battery_full_soc
+              show_remaining_energy: true
+              navigate: /home-mobile-view/energy
+            solar:
+              mppts: 3
+              show_daily: true
+              display_mode: 2
+              efficiency: 2
+              max_power: 4800
+              pv1_name: New panels
+              pv1_max_power: 1600
+              pv2_name: Old panels
+              pv2_max_power: 1600
+              pv3_name: Conservatory
+              pv3_max_power: 1600
+              navigate: /home-mobile-view/energy
+            load:
+              show_daily: true
+              essential_name: House
+              max_power: 6000
+            grid:
+              show_daily_buy: true
+              show_daily_sell: true
+              show_nonessential: false
+              max_power: 6000
+            type: custom:sunsynk-power-flow-card
+            entities:
+              pv1_power_186: sensor.hms_1600_4t_power
+              pv2_power_187: sensor.hms_1600_4t_old_panels_power
+              pv3_power_188: sensor.hms_1600_4t_conservatory_power
+              pv_total: sensor.site_solar_total_power
+              day_pv_energy_108: sensor.site_solar_today_wh
+              remaining_solar: sensor.energy_production_today_remaining
+              environment_temp: sensor.tasmotatempsensoroutside_bme280_temperature
+              pv1_voltage_109: none
+              pv1_current_110: none
+              pv2_voltage_111: none
+              pv2_current_112: none
+              pv3_voltage_113: none
+              pv3_current_114: none
+              solar_sell_247: none
+              battery_power_190: sensor.sofar_ess_battery_dc_power
+              battery_current_191: sensor.sofar_ess_battery_current
+              battery_voltage_183: sensor.sofar_ess_battery_voltage
+              battery_soc_184: sensor.sofar_ess_battery_a_soc
+              battery_temp_182: none
+              day_battery_charge_70: none
+              day_battery_discharge_71: none
+              battery2_power_190: zero
+              battery2_current_191: zero
+              battery2_voltage_183: none
+              battery2_soc_184: sensor.sofar_ess_battery_b_soc
+              battery2_temp_182: none
+              essential_power: sensor.house_load_power
+              day_load_energy_84: sensor.house_load_energy_daily
+              aux_power_166: none
+              grid_ct_power_172: sensor.sofar_ess_grid_power
+              day_grid_import_76: sensor.grid_energy_imported_daily
+              day_grid_export_77: sensor.grid_energy_exported_daily
+              nonessential_power: 'no'
+              grid_connected_status_194: none
+              max_sell_power: none
+              inverter_status_59: sensor.sofar_ess_run_state_name
+              inverter_power_175: none
+              grid_power_169: none
+              inverter_voltage_154: none
+              inverter_current_164: none
+              load_frequency_192: none
+              radiator_temp_91: none
+              dc_transformer_temp_90: none
+              use_timer_248: 'no'
+              priority_load_243: 'no'
+        columns: 1
   - title: Cameras
     path: cameras
     cards:
@@ -677,7 +843,7 @@ views:
   - theme: Backend-selected
     title: Temperature
     path: Temperature
-    icon: ""
+    icon: ''
     badges: []
     cards:
       - type: entities
@@ -716,14 +882,15 @@ views:
     cards:
       - type: entities
         entities:
-          - switch.windowamelie
-          - switch.windowamelie_2
-        title: Window Amelie
-        show_header_toggle: false
-      - type: tile
-        entity: switch.gas_switch
-        features:
-          - type: toggle
+          - entity: sensor.aqs_sen6x_c3_co2
+          - entity: sensor.aqs_sen6x_c3_nox_index
+          - entity: sensor.aqs_sen6x_c3_pm_1_0
+          - entity: sensor.aqs_sen6x_c3_pm_2_5
+          - entity: sensor.aqs_sen6x_c3_pm_4_0
+          - entity: sensor.aqs_sen6x_c3_pm_10
+          - entity: sensor.aqs_sen6x_c3_voc_index
+          - entity: sensor.aqs_sen6x_c3_humidity
+          - entity: sensor.aqs_sen6x_c3_temperature
       - type: grid
         square: false
         columns: 1
@@ -734,24 +901,14 @@ views:
               - type: humidifier-toggle
       - type: entities
         entities:
-          - entity: sensor.aqs_sen6x_c3_co2
-          - entity: sensor.aqs_sen6x_c3_nox_index
-          - entity: sensor.aqs_sen6x_c3_pm_1_0
-          - entity: sensor.aqs_sen6x_c3_pm_2_5
-          - entity: sensor.aqs_sen6x_c3_pm_4_0
-          - entity: sensor.aqs_sen6x_c3_pm_10
-          - entity: sensor.aqs_sen6x_c3_voc_index
-          - entity: sensor.aqs_sen6x_c3_humidity
-          - entity: sensor.aqs_sen6x_c3_temperature
-      - type: history-graph
-        entities:
-          - entity: switch.boilercontroller_tasmota
-          - entity: sensor.aqs_sen6x_c3_voc_index
-          - entity: sensor.aqs_sen6x_c3_co2
-          - entity: sensor.aqs_sen6x_c3_humidity
-          - entity: sensor.aqs_sen6x_c3_temperature
-          - entity: sensor.powermonitor_energy_power
-        title: "Air quality "
+          - switch.windowamelie
+          - switch.windowamelie_2
+        title: Window Amelie
+        show_header_toggle: false
+      - type: tile
+        entity: switch.gas_switch
+        features:
+          - type: toggle
     badges: []
   - title: Motion Sensor
     path: motion-sensor
