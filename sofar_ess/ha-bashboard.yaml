@@ -720,7 +720,7 @@ views:
         type: grid
         cards:
           - cardstyle: lite
-            wide: true
+            wide: false
             large_font: true
             show_solar: true
             show_battery: true
@@ -739,19 +739,35 @@ views:
               autarky: power
               navigate: /home-mobile-view/energy
             battery:
-              count: 2
-              energy: 10000
+              energy: 15000
               shutdown_soc: number.sofar_ess_battery_empty_soc
               soc_end_of_charge: number.sofar_ess_battery_full_soc
               max_power: 3000
               show_remaining_energy: true
               navigate: /home-mobile-view/energy
+              count: 1
+              remaining_energy_to_shutdown: true
+              show_daily: false
+              show_absolute: false
+              colour: '#2200ff'
+              charge_colour: '#00ff00'
             battery2:
-              energy: 5000
-              shutdown_soc: number.sofar_ess_battery_empty_soc
-              soc_end_of_charge: number.sofar_ess_battery_full_soc
+              energy: 0
+              shutdown_soc: 20
+              soc_end_of_charge: 100
+              invert_power: false
+              hide_soc: false
+              colour: '#ffc0cb'
               show_remaining_energy: true
-              navigate: /home-mobile-view/energy
+              remaining_energy_to_shutdown: false
+              show_absolute: false
+              auto_scale: true
+              dynamic_colour: true
+              linear_gradient: true
+              animate: true
+              path_threshold: 100
+              navigate: ''
+              invert_flow: false
             solar:
               mppts: 3
               show_daily: true
@@ -763,8 +779,8 @@ views:
               pv2_name: Old panels
               pv2_max_power: 1600
               pv3_name: Conservatory
-              pv3_max_power: 1600
               navigate: /home-mobile-view/energy
+              pv3_max_power: 500
             load:
               show_daily: true
               essential_name: House
@@ -793,7 +809,7 @@ views:
               battery_power_190: sensor.sofar_ess_battery_dc_power
               battery_current_191: sensor.sofar_ess_battery_current
               battery_voltage_183: sensor.sofar_ess_battery_voltage
-              battery_soc_184: sensor.sofar_ess_battery_a_soc
+              battery_soc_184: sensor.sofar_ess_battery_combined_soc
               battery_temp_182: none
               day_battery_charge_70: none
               day_battery_discharge_71: none

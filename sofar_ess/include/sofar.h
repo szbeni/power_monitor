@@ -13,6 +13,18 @@ enum class SofarMode : uint8_t {
   Discharge,
 };
 
+struct SofarBatteryParams {
+  uint16_t raw[12] = {}; // 0x10B1 .. 0x10BC
+  bool regOk[12] = {};
+  char regWhy[12][16] = {}; // per-register: "ok", "exception", "no-rx", …
+  bool valid = false;       // true when all 12 registers read OK
+  uint32_t updatedMs = 0;
+  uint32_t lastPollMs = 0;
+  uint16_t pollAttempts = 0;
+  char pollDiag[64] = "";  // summary e.g. "7/12 ok"
+  char regDiag[256] = {};  // per-register detail for MQTT debug
+};
+
 struct SofarStatus {
   uint16_t runState = 0;
   uint16_t gridPowerRaw = 0;
@@ -55,10 +67,29 @@ struct SofarStatus {
   float pvTodayKwh = 0.0f;
   bool pvTodayValid = false;
 
+  // Battery profile settings 0x10B1–0x10BC (FC 0x04 read / FC 0x13 write).
+  SofarBatteryParams battParams;
+
   // Last Modbus failure reason (timeout, crc, exception, …).
   char lastError[24] = "";
   // SOC reads not accepted (out of range / awaiting confirmation). Diagnostic.
   uint16_t socRejects = 0;
+};
+
+constexpr uint8_t SOFAR_BATT_PARAM_COUNT = 12;
+constexpr uint16_t SOFAR_BATT_PARAM_REG_BASE = 0x10B1;
+
+struct SofarBattParamMeta {
+  uint16_t reg;
+  const char* key;       // MQTT suffix e.g. "capacity_ah"
+  const char* haName;    // HA display name
+  float scale;
+  uint16_t rawMin;
+  uint16_t rawMax;
+  float step;
+  const char* unit;
+  uint8_t decimals;
+  bool writable;
 };
 
 bool sofarBegin(HardwareSerial& bus);
@@ -96,3 +127,19 @@ const char* sofarRunStateName(uint16_t runState);
 size_t sofarFormatFaults(const SofarStatus& s, char* out, size_t outLen);
 size_t sofarFormatAlerts(const SofarStatus& s, char* out, size_t outLen);
 size_t sofarFormatBattFaults(const SofarStatus& s, char* out, size_t outLen);
+
+// Battery profile 0x10B1–0x10BC (hybrid map, FC 0x04/0x13).
+void sofarBattParamProbeBegin(SofarBatteryParams& p);
+bool sofarPollBatteryParamReg(SofarStatus& cache, uint8_t index);
+void sofarBattParamBuildDiag(SofarBatteryParams& p);
+uint8_t sofarBattParamOkCount(const SofarBatteryParams& p);
+bool sofarPollBatteryParams(SofarStatus& cache); // legacy: all regs in one call
+bool sofarWriteBatteryParam(SofarStatus& cache, uint8_t index, uint16_t raw);
+uint8_t sofarBattParamCount();
+const SofarBattParamMeta* sofarBattParamMeta(uint8_t index);
+const SofarBattParamMeta* sofarBattParamMetaByKey(const char* key);
+int8_t sofarBattParamIndexByKey(const char* key);
+float sofarBattParamScaled(const SofarBatteryParams& p, uint8_t index);
+bool sofarBattParamScaledToRaw(uint8_t index, float scaled, uint16_t& raw);
+bool sofarBattParamValidateWrite(const SofarBatteryParams& p, uint8_t index, uint16_t raw);
+const char* sofarLastModbusError();

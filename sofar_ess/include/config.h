@@ -101,6 +101,30 @@
 #define ESS_LOOP_INTERVAL_MS 500
 #endif
 
+// Battery profile 0x10B1–0x10BC (FC 0x04/0x03). Many ME3000SP units reject these
+// addresses — leave off unless you know your inverter supports them.
+// ME3000SP rejects entire 0x10B1–0x10BC map (FC04=no-rx, FC03=exception).
+#ifndef BATT_PARAM_ENABLE
+#define BATT_PARAM_ENABLE 0
+#endif
+// Battery profile poll interval when enabled. Low priority — not in ESS round-robin.
+#ifndef BATT_PARAM_POLL_MS
+#define BATT_PARAM_POLL_MS 60000
+#endif
+// Retry sooner after a failed batt_param poll (FC 0x04/0x03 attempts).
+#ifndef BATT_PARAM_RETRY_MS
+#define BATT_PARAM_RETRY_MS 15000
+#endif
+// Gap between single-register probes (one Modbus read per tick — non-blocking).
+#ifndef BATT_PARAM_REG_GAP_MS
+#define BATT_PARAM_REG_GAP_MS 1500
+#endif
+
+// JSY cumulative energy MQTT publish interval (not needed at ESS rate).
+#ifndef ENERGY_METER_PUBLISH_MS
+#define ENERGY_METER_PUBLISH_MS 60000
+#endif
+
 // Deadband around 0 W — freeze integrator / avoid chatter
 #ifndef ESS_DEADBAND_W
 #define ESS_DEADBAND_W 10
@@ -127,7 +151,7 @@
 #define DUAL_BATT_ENABLE 1
 #endif
 #ifndef DUAL_BATT_EMPTY_SOC
-#define DUAL_BATT_EMPTY_SOC 20
+#define DUAL_BATT_EMPTY_SOC 5
 #endif
 #ifndef DUAL_BATT_FULL_SOC
 #define DUAL_BATT_FULL_SOC 98
@@ -215,8 +239,9 @@
 #ifndef FOLLOW_RAMP_STEP_W
 #define FOLLOW_RAMP_STEP_W 20
 #endif
+// Follow-recovery empty limit when SOC protect is off (else ess_soc_protect_low is used).
 #ifndef FOLLOW_EMPTY_SOC
-#define FOLLOW_EMPTY_SOC 25
+#define FOLLOW_EMPTY_SOC 5
 #endif
 #ifndef FOLLOW_FULL_SOC
 #define FOLLOW_FULL_SOC 90

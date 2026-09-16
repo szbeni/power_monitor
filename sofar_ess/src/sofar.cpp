@@ -15,6 +15,8 @@ uint8_t lastPassiveResult_ = 0;
 bool lastPassiveValid_ = false;
 
 constexpr uint8_t FN_READ = 0x03;
+constexpr uint8_t FN_READ_SETTINGS = 0x04;
+constexpr uint8_t FN_WRITE_SETTINGS = 0x13;
 constexpr uint8_t FN_PASSIVE = 0x42;
 constexpr uint8_t FN_HEARTBEAT = 0x49;
 constexpr uint16_t CMD_STANDBY = 0x0100;
@@ -31,6 +33,7 @@ constexpr uint16_t REG_PVDAY = 0x0218;    // today generation ×0.01 kWh
 constexpr uint16_t REG_ALERT = 0x022b;
 constexpr uint16_t REG_BATTFAULT1 = 0x023d; // batt fault bytes 0–1 … +4
 constexpr uint16_t REG_PV1_V = 0x0250;    // PV1/2 block: V×0.1, I×0.01 A, P×0.01 kW
+constexpr uint16_t REG_BATT_PARAM_BASE = 0x10B1;
 
 constexpr uint32_t kListenTimeoutMs = 400;
 // A reply that is still in flight when we transmit would be read as the answer
@@ -275,6 +278,72 @@ bool readRegs(uint16_t reg, uint16_t count, uint16_t* values) {
 
 bool readReg(uint16_t reg, uint16_t& value) {
   return readRegs(reg, 1, &value);
+}
+
+bool readRegsWithFn(uint8_t fn, uint16_t reg, uint16_t count, uint16_t* values) {
+  if (count == 0 || count > 16 || !values) {
+    listenFailWhy_ = "bad-count";
+    return false;
+  }
+  uint8_t frame[] = {
+      SOFAR_SLAVE_ID,
+      fn,
+      uint8_t(reg >> 8),
+      uint8_t(reg & 0xff),
+      uint8_t(count >> 8),
+      uint8_t(count & 0xff),
+      0,
+      0};
+  Resp rs;
+  const uint8_t expectBytes = uint8_t(count * 2);
+  if (!sendRaw(frame, sizeof(frame), &rs, fn) || rs.dataSize != expectBytes) {
+    return false;
+  }
+  for (uint16_t i = 0; i < count; i++) {
+    values[i] = (uint16_t(rs.data[i * 2]) << 8) | rs.data[i * 2 + 1];
+  }
+  return true;
+}
+
+bool readSettingRegs(uint16_t reg, uint16_t count, uint16_t* values) {
+  if (readRegsWithFn(FN_READ_SETTINGS, reg, count, values)) {
+    return true;
+  }
+  const char* why04 = listenFailWhy_;
+  if (readRegsWithFn(FN_READ, reg, count, values)) {
+    Log.printf("[sofar] read-settings 0x%04X x%u OK via FC 0x03 (0x04 was %s)\n",
+               reg,
+               count,
+               why04);
+    return true;
+  }
+  Log.printf("[sofar] read-settings 0x%04X x%u FAIL (0x04=%s, 0x03=%s)\n",
+             reg,
+             count,
+             why04,
+             listenFailWhy_);
+  return false;
+}
+
+bool writeSettingReg(uint16_t reg, uint16_t value) {
+  uint8_t frame[] = {
+      SOFAR_SLAVE_ID,
+      FN_WRITE_SETTINGS,
+      uint8_t(reg >> 8),
+      uint8_t(reg & 0xff),
+      0,
+      1,
+      uint8_t(value >> 8),
+      uint8_t(value & 0xff),
+      0,
+      0};
+  // FC 0x13 reply mirrors the request (no Modbus byte-count field) — drain only.
+  if (!sendRaw(frame, sizeof(frame), nullptr, FN_WRITE_SETTINGS)) {
+    Log.printf("[sofar] write-settings 0x%04X=%u FAIL (%s)\n", reg, value, listenFailWhy_);
+    return false;
+  }
+  Log.printf("[sofar] write-settings 0x%04X=%u OK\n", reg, value);
+  return true;
 }
 
 void setLastError(SofarStatus& cache, const char* why) {
@@ -836,4 +905,250 @@ bool sofarChargeProhibited() {
 
 bool sofarDischargeProhibited() {
   return lastPassiveValid_ && (lastPassiveStatus_ & 0x08) != 0;
+}
+
+namespace {
+constexpr uint8_t kBattParamDodIdx = 8;
+constexpr uint8_t kBattParamGridDodIdx = 9;
+
+const SofarBattParamMeta kBattParamMeta[SOFAR_BATT_PARAM_COUNT] = {
+    {0x10B1, "capacity_ah", "Battery Capacity", 1.0f, 0, 999, 1.0f, "Ah", 0, true},
+    {0x10B2, "energy_mgmt", "Energy Management Model", 1.0f, 0, 65535, 1.0f, "", 0, false},
+    {0x10B3, "max_charge_voltage_v", "Max Charge Voltage", 0.1f, 500, 580, 0.1f, "V", 1, true},
+    {0x10B4, "max_charge_current_a", "Max Charge Current", 0.01f, 0, 6500, 0.01f, "A", 2, true},
+    {0x10B5, "over_voltage_v", "Over-Voltage Protection", 0.1f, 500, 585, 0.1f, "V", 1, true},
+    {0x10B6, "min_discharge_voltage_v", "Min Discharge Voltage", 0.1f, 420, 520, 0.1f, "V", 1, true},
+    {0x10B7, "max_discharge_current_a", "Max Discharge Current", 0.01f, 0, 7000, 0.01f, "A", 2, true},
+    {0x10B8, "under_voltage_v", "Under-Voltage Protection", 0.1f, 420, 520, 0.1f, "V", 1, true},
+    {0x10B9, "dod_pct", "Depth of Discharge", 1.0f, 0, 100, 1.0f, "%", 0, true},
+    {0x10BA, "grid_dod_pct", "Grid Shallow DOD", 1.0f, 0, 100, 1.0f, "%", 0, true},
+    {0x10BB, "empty_voltage_v", "Empty Battery Voltage", 0.01f, 4250, 4700, 0.01f, "V", 2, true},
+    {0x10BC, "full_voltage_v", "Full Battery Voltage", 0.01f, 4701, 5500, 0.01f, "V", 2, true},
+};
+} // namespace
+
+uint8_t sofarBattParamCount() {
+  return SOFAR_BATT_PARAM_COUNT;
+}
+
+const SofarBattParamMeta* sofarBattParamMeta(uint8_t index) {
+  if (index >= SOFAR_BATT_PARAM_COUNT) {
+    return nullptr;
+  }
+  return &kBattParamMeta[index];
+}
+
+const SofarBattParamMeta* sofarBattParamMetaByKey(const char* key) {
+  if (!key || !key[0]) {
+    return nullptr;
+  }
+  for (uint8_t i = 0; i < SOFAR_BATT_PARAM_COUNT; i++) {
+    if (strcmp(kBattParamMeta[i].key, key) == 0) {
+      return &kBattParamMeta[i];
+    }
+  }
+  return nullptr;
+}
+
+int8_t sofarBattParamIndexByKey(const char* key) {
+  if (!key || !key[0]) {
+    return -1;
+  }
+  for (uint8_t i = 0; i < SOFAR_BATT_PARAM_COUNT; i++) {
+    if (strcmp(kBattParamMeta[i].key, key) == 0) {
+      return int8_t(i);
+    }
+  }
+  return -1;
+}
+
+float sofarBattParamScaled(const SofarBatteryParams& p, uint8_t index) {
+  const SofarBattParamMeta* m = sofarBattParamMeta(index);
+  if (!m || m->scale <= 0.0f) {
+    return NAN;
+  }
+  return float(p.raw[index]) * m->scale;
+}
+
+bool sofarBattParamScaledToRaw(uint8_t index, float scaled, uint16_t& raw) {
+  const SofarBattParamMeta* m = sofarBattParamMeta(index);
+  if (!m || m->scale <= 0.0f) {
+    return false;
+  }
+  const int32_t r = lroundf(scaled / m->scale);
+  if (r < 0 || r > 65535) {
+    return false;
+  }
+  raw = uint16_t(r);
+  return true;
+}
+
+bool sofarBattParamValidateWrite(const SofarBatteryParams& p, uint8_t index, uint16_t raw) {
+  const SofarBattParamMeta* m = sofarBattParamMeta(index);
+  if (!m || !m->writable) {
+    return false;
+  }
+  if (raw < m->rawMin || raw > m->rawMax) {
+    return false;
+  }
+  if (index == kBattParamGridDodIdx) {
+    const uint16_t dod = p.valid ? p.raw[kBattParamDodIdx] : raw;
+    if (raw > dod) {
+      return false;
+    }
+  }
+  if (index == kBattParamDodIdx) {
+    const uint16_t gridDod = p.valid ? p.raw[kBattParamGridDodIdx] : raw;
+    if (gridDod > raw) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const char* sofarLastModbusError() {
+  return listenFailWhy_ ? listenFailWhy_ : "";
+}
+
+void sofarBattParamProbeBegin(SofarBatteryParams& p) {
+  memset(p.regOk, 0, sizeof(p.regOk));
+  memset(p.regWhy, 0, sizeof(p.regWhy));
+  p.valid = false;
+  p.pollDiag[0] = '\0';
+  p.regDiag[0] = '\0';
+}
+
+uint8_t sofarBattParamOkCount(const SofarBatteryParams& p) {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < SOFAR_BATT_PARAM_COUNT; i++) {
+    if (p.regOk[i]) {
+      n++;
+    }
+  }
+  return n;
+}
+
+void sofarBattParamBuildDiag(SofarBatteryParams& p) {
+  const uint8_t okCount = sofarBattParamOkCount(p);
+  snprintf(p.pollDiag,
+           sizeof(p.pollDiag),
+           "%u/%u ok",
+           unsigned(okCount),
+           unsigned(SOFAR_BATT_PARAM_COUNT));
+
+  size_t used = 0;
+  for (uint8_t i = 0; i < SOFAR_BATT_PARAM_COUNT; i++) {
+    const SofarBattParamMeta* m = sofarBattParamMeta(i);
+    const uint16_t reg = m ? m->reg : uint16_t(REG_BATT_PARAM_BASE + i);
+    const char* why = p.regWhy[i][0] ? p.regWhy[i] : (p.regOk[i] ? "ok" : "?");
+    if (used >= sizeof(p.regDiag) - 1) {
+      break;
+    }
+    const int n = snprintf(p.regDiag + used,
+                           sizeof(p.regDiag) - used,
+                           "%s%04X:%s",
+                           used ? " " : "",
+                           reg,
+                           why);
+    if (n <= 0) {
+      break;
+    }
+    used += size_t(n);
+  }
+  p.valid = (okCount == SOFAR_BATT_PARAM_COUNT);
+}
+
+bool sofarPollBatteryParamReg(SofarStatus& cache, uint8_t index) {
+  if (!bus_ || index >= SOFAR_BATT_PARAM_COUNT) {
+    if (index < SOFAR_BATT_PARAM_COUNT) {
+      strncpy(cache.battParams.regWhy[index], "no-bus", sizeof(cache.battParams.regWhy[index]) - 1);
+      cache.battParams.regWhy[index][sizeof(cache.battParams.regWhy[index]) - 1] = '\0';
+      cache.battParams.regOk[index] = false;
+    }
+    return false;
+  }
+
+  const SofarBattParamMeta* m = sofarBattParamMeta(index);
+  const uint16_t reg = m ? m->reg : uint16_t(REG_BATT_PARAM_BASE + index);
+  uint16_t val = 0;
+
+  if (readRegsWithFn(FN_READ_SETTINGS, reg, 1, &val)) {
+    cache.battParams.raw[index] = val;
+    cache.battParams.regOk[index] = true;
+    snprintf(cache.battParams.regWhy[index],
+             sizeof(cache.battParams.regWhy[index]),
+             "ok/04(0x%04X)",
+             val);
+    setLastError(cache, "");
+    return true;
+  }
+  const char* why04 = listenFailWhy_ ? listenFailWhy_ : "?";
+
+  if (readRegsWithFn(FN_READ, reg, 1, &val)) {
+    cache.battParams.raw[index] = val;
+    cache.battParams.regOk[index] = true;
+    snprintf(cache.battParams.regWhy[index],
+             sizeof(cache.battParams.regWhy[index]),
+             "ok/03(0x%04X)",
+             val);
+    setLastError(cache, "");
+    return true;
+  }
+  const char* why03 = listenFailWhy_ ? listenFailWhy_ : "?";
+
+  cache.battParams.regOk[index] = false;
+  snprintf(cache.battParams.regWhy[index],
+           sizeof(cache.battParams.regWhy[index]),
+           "04=%s,03=%s",
+           why04,
+           why03);
+  setLastError(cache, why03);
+  return false;
+}
+
+bool sofarPollBatteryParams(SofarStatus& cache) {
+  if (!bus_) {
+    strncpy(cache.battParams.pollDiag, "no bus", sizeof(cache.battParams.pollDiag) - 1);
+    cache.battParams.pollDiag[sizeof(cache.battParams.pollDiag) - 1] = '\0';
+    return false;
+  }
+
+  cache.battParams.pollAttempts++;
+  cache.battParams.lastPollMs = millis();
+  sofarBattParamProbeBegin(cache.battParams);
+
+  for (uint8_t i = 0; i < SOFAR_BATT_PARAM_COUNT; i++) {
+    sofarPollBatteryParamReg(cache, i);
+  }
+  sofarBattParamBuildDiag(cache.battParams);
+  if (cache.battParams.valid) {
+    cache.battParams.updatedMs = millis();
+    setLastError(cache, "");
+  }
+  return cache.battParams.valid;
+}
+
+bool sofarWriteBatteryParam(SofarStatus& cache, uint8_t index, uint16_t raw) {
+  if (!bus_ || index >= SOFAR_BATT_PARAM_COUNT) {
+    return false;
+  }
+  const SofarBattParamMeta* m = sofarBattParamMeta(index);
+  if (!m || !m->writable) {
+    return false;
+  }
+  if (!sofarBattParamValidateWrite(cache.battParams, index, raw)) {
+    return false;
+  }
+  if (!writeSettingReg(m->reg, raw)) {
+    setLastError(cache, listenFailWhy_);
+    return false;
+  }
+  if (!sofarPollBatteryParamReg(cache, index)) {
+    return false;
+  }
+  sofarBattParamBuildDiag(cache.battParams);
+  if (cache.battParams.valid) {
+    cache.battParams.updatedMs = millis();
+  }
+  return true;
 }

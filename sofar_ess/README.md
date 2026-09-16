@@ -20,6 +20,12 @@ Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator fr
 
 **Battery metering:** Sofar `0x020D` is published as **charge/discharge power** (register name). Prefer **battery DC power** = V×I from `0x020E`/`0x020F` for load math — AC-coupled Hoymiles charge is under-reported by `0x020D`. Site solar totals sum Hoymiles 1600 + 800 + Sofar DC PV strings.
 
+**Inverter battery profile (`0x10B1–0x10BC`):** read via FC `0x04` (falls back to FC `0x03` on ME3000SP), write via Sofar FC `0x13`. Polled every 60 s (not in the ESS round-robin). Values live in the inverter — survive firmware reboot. MQTT `batt_param/*` + `set/batt_param/<key>`. Distinct from firmware ESS SOC protect.
+
+**Grid energy totals:** `grid_import_wh` / `grid_export_wh` (and `ess/energy_*` aliases) publish every 60 s — not on the 500 ms ESS loop. Live values remain in `…/state` JSON (~5 s).
+
+**Settings persistence:** ESS tuning (`kp`, `soc_protect_*`, etc.) and dual-battery thresholds are saved to ESP32 NVS on change and restored on boot.
+
 **Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). A pack also counts as full once high-SOC protect latches on it, or once it stops accepting more than `FOLLOW_TAPER_MIN_W` (150 W) of a much larger charge command — tapering to a lower power near the top is normal charging and does not hand over. Force a bank via `set/battery`. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle (`DUAL_BATT_SETTLE_MS`, 15 s) → invalidate SOC → re-poll until confirmed.
 
 **SOC validation** (why a bank switch no longer reports a bogus SOC): a mis-paired Modbus reply is indistinguishable from a real register value, so SOC is filtered three ways.
@@ -121,8 +127,10 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/ess/battery_dc_power` | pub | Battery DC power from V×I (W). Prefer this for load / acceptance |
 | `…/ess/battery_voltage` | pub | Battery voltage (V) from `0x020E` |
 | `…/ess/battery_current` | pub | Battery current (A) from `0x020F` |
-| `…/ess/energy_import_wh` | pub | JSY channel-2 energy imported from grid (Wh) |
-| `…/ess/energy_export_wh` | pub | JSY channel-2 energy exported to grid (Wh) |
+| `…/ess/energy_import_wh` | pub | JSY import total (Wh), ~60 s |
+| `…/ess/energy_export_wh` | pub | JSY export total (Wh), ~60 s |
+| `…/grid_import_wh` | pub | Same as `ess/energy_import_wh` (~60 s) |
+| `…/grid_export_wh` | pub | Same as `ess/energy_export_wh` (~60 s) |
 | `…/ess/command_w` | pub | Last ESS setpoint sent to Sofar (+discharge / −charge; near-zero uses hold min, not 0) |
 | `…/ess/mode` | pub | Last Sofar mode string: `standby` / `charge` / `discharge` / `auto` / `unknown` |
 | `…/ess/enabled` | pub | `true` if closed-loop ESS is running; `false` if manual-only |
@@ -141,6 +149,13 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/ess/min_delta` | pub | Min command change watts (retained) |
 | `…/ess/hold_min` | pub | Near-zero hold watts instead of standby (retained) |
 | `…/ess/integral` | pub | Current integrator state |
+| `…/batt_param/valid` | pub | `true` when `0x10B1–0x10BC` block read succeeded |
+| `…/batt_param/capacity_ah` | pub | Battery capacity (Ah) from `0x10B1` |
+| `…/batt_param/max_charge_voltage_v` | pub | Max charge voltage (V) from `0x10B3` |
+| `…/batt_param/max_charge_current_a` | pub | Max charge current (A) from `0x10B4` |
+| `…/batt_param/dod_pct` | pub | Depth of discharge % from `0x10B9` |
+| `…/batt_param/*` | pub | Other decoded battery-profile registers |
+| `…/set/batt_param/<key>` | sub | Write one battery-profile register (standby → write → restore) |
 | `…/battery/active` | pub | Connected bank `A` / `B` (retained) |
 | `…/battery/a/soc` | pub | Last-known bank A SOC % or `null` (retained) |
 | `…/battery/b/soc` | pub | Last-known bank B SOC % or `null` (retained) |

@@ -2,6 +2,7 @@
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
 #include <MycilaJSY.h>
+#include <Preferences.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -53,6 +54,12 @@ static bool lastSofarOk = false;
 static uint32_t lastEssMs = 0;
 static uint32_t lastHeartbeatMs = 0;
 static uint32_t lastMqttStateMs = 0;
+static uint32_t lastBattParamPollMs = 0;
+static uint32_t lastBattParamRegMs = 0;
+static uint32_t lastEnergyPublishMs = 0;
+static bool battParamPollNow = true;
+static bool battParamProbing = false;
+static uint8_t battParamProbeIdx = 0;
 static uint32_t lastCmdMs = 0;
 static int16_t lastCmdW = 0; // +discharge, -charge, 0=standby
 static uint32_t essChargeBlockedFullMs = 0; // last charge suppressed by full protect
@@ -117,6 +124,18 @@ static void resetEssIntegral() {
   essIntegral = 0.0f;
 }
 
+// Lowest SOC for discharge / dual-bank empty — follows ESS protect low when enabled.
+static uint8_t essDischargeFloorSoc() {
+  if (essSocProtectEnabled) {
+    return essSocProtectLow;
+  }
+#if DUAL_BATT_ENABLE
+  return dualBattEmptySoc;
+#else
+  return uint8_t(FOLLOW_EMPTY_SOC);
+#endif
+}
+
 static const char* followRecoveryName(FollowRecovery r) {
   switch (r) {
     case FollowRecovery::SwapEmpty:
@@ -136,6 +155,68 @@ static void beginFollowGrace() {
   followGraceActive = true;
   followOk = true;
   followErrorW = 0;
+}
+
+static Preferences nvsPrefs;
+static constexpr const char* kNvsNs = "sofar_ess";
+
+static void nvsPutBool(const char* key, bool v) {
+  if (nvsPrefs.begin(kNvsNs, false)) {
+    nvsPrefs.putBool(key, v);
+    nvsPrefs.end();
+  }
+}
+
+static void nvsPutU8(const char* key, uint8_t v) {
+  if (nvsPrefs.begin(kNvsNs, false)) {
+    nvsPrefs.putUChar(key, v);
+    nvsPrefs.end();
+  }
+}
+
+static void nvsPutU16(const char* key, uint16_t v) {
+  if (nvsPrefs.begin(kNvsNs, false)) {
+    nvsPrefs.putUInt(key, v);
+    nvsPrefs.end();
+  }
+}
+
+static void nvsPutFloat(const char* key, float v) {
+  if (nvsPrefs.begin(kNvsNs, false)) {
+    nvsPrefs.putFloat(key, v);
+    nvsPrefs.end();
+  }
+}
+
+static void loadSettingsFromNvs() {
+  if (!nvsPrefs.begin(kNvsNs, true)) {
+    return;
+  }
+  essEnabled = nvsPrefs.getBool("ess_en", essEnabled);
+  essChargeOnlyUser = nvsPrefs.getBool("chg_only", essChargeOnlyUser);
+  essSocProtectEnabled = nvsPrefs.getBool("soc_prot_en", essSocProtectEnabled);
+  essSocProtectLow = nvsPrefs.getUChar("soc_lo", essSocProtectLow);
+  essSocProtectHyst = nvsPrefs.getUChar("soc_hyst", essSocProtectHyst);
+  essSocProtectHigh = nvsPrefs.getUChar("soc_hi", essSocProtectHigh);
+  essSocProtectHighHyst = nvsPrefs.getUChar("soc_hi_hyst", essSocProtectHighHyst);
+  essKp = nvsPrefs.getFloat("kp", essKp);
+  essKi = nvsPrefs.getFloat("ki", essKi);
+  essDeadbandW = nvsPrefs.getFloat("deadband", essDeadbandW);
+  essMinDeltaW = nvsPrefs.getFloat("min_delta", essMinDeltaW);
+  essHoldMinW = uint16_t(nvsPrefs.getUInt("hold_min", essHoldMinW));
+  chargeTargetSoc = nvsPrefs.getUChar("chg_tgt", chargeTargetSoc);
+#if DUAL_BATT_ENABLE
+  dualBattEmptySoc = nvsPrefs.getUChar("db_empty", dualBattEmptySoc);
+  dualBattFullSoc = nvsPrefs.getUChar("db_full", dualBattFullSoc);
+  dualBattForce = nvsPrefs.getUChar("db_force", dualBattForce);
+  dualBattEnabled = nvsPrefs.getBool("db_en", dualBattEnabled);
+  if (essSocProtectEnabled && dualBattEmptySoc > essSocProtectLow) {
+    dualBattEmptySoc = essSocProtectLow;
+    nvsPutU8("db_empty", dualBattEmptySoc);
+  }
+#endif
+  nvsPrefs.end();
+  Log.println("[nvs] settings loaded");
 }
 
 static bool mqttPublish(const char* suffix, const String& payload, bool retain = false) {
@@ -179,6 +260,236 @@ static void publishEssParams() {
   mqttPublish("ess/charge_only", essChargeOnlyUser ? "true" : "false", true);
   mqttPublish("ess/effective_charge_only", essEffectiveChargeOnly() ? "true" : "false", true);
   publishSocProtectParams();
+}
+
+#if DUAL_BATT_ENABLE
+static bool dualBattBusy();
+#endif
+
+static void publishBattParamDiag(const char* skippedReason = nullptr) {
+  if (skippedReason && skippedReason[0]) {
+    mqttPublish("batt_param/poll_diag", skippedReason);
+    mqttPublish("batt_param/last_error", skippedReason);
+    return;
+  }
+  mqttPublish("batt_param/poll_diag", lastSofar.battParams.pollDiag[0] ? lastSofar.battParams.pollDiag : "unknown");
+  if (lastSofar.battParams.regDiag[0]) {
+    mqttPublish("batt_param/reg_diag", lastSofar.battParams.regDiag);
+  }
+  mqttPublish("batt_param/last_error", lastSofar.lastError[0] ? lastSofar.lastError : sofarLastModbusError());
+  mqttPublish("batt_param/poll_attempts", String(lastSofar.battParams.pollAttempts));
+  mqttPublish("batt_param/last_poll_ms", String(lastSofar.battParams.lastPollMs));
+  const uint8_t okCount = sofarBattParamOkCount(lastSofar.battParams);
+  mqttPublish("batt_param/probe_progress",
+              String(okCount) + "/" + String(sofarBattParamCount()));
+}
+
+static void publishBattParamReg(uint8_t index) {
+  const SofarBattParamMeta* m = sofarBattParamMeta(index);
+  if (!m) {
+    return;
+  }
+  char regHex[8];
+  snprintf(regHex, sizeof(regHex), "%04x", m->reg);
+  const char* why = lastSofar.battParams.regWhy[index][0] ? lastSofar.battParams.regWhy[index] : "?";
+  mqttPublish((String("batt_param/reg/") + regHex).c_str(), why);
+
+  if (!lastSofar.battParams.regOk[index]) {
+    return;
+  }
+  const float scaled = sofarBattParamScaled(lastSofar.battParams, index);
+  String topic = String("batt_param/") + m->key;
+  if (m->decimals == 0) {
+    mqttPublish(topic.c_str(), String(lroundf(scaled)));
+  } else {
+    mqttPublish(topic.c_str(), String(scaled, unsigned(m->decimals)));
+  }
+  char hex[8];
+  snprintf(hex, sizeof(hex), "%04X", lastSofar.battParams.raw[index]);
+  mqttPublish((String("batt_param/raw/") + regHex).c_str(), hex);
+}
+
+static void publishBattParams() {
+  const uint8_t okCount = sofarBattParamOkCount(lastSofar.battParams);
+  mqttPublish("batt_param/valid", lastSofar.battParams.valid ? "true" : "false");
+  publishBattParamDiag();
+  for (uint8_t i = 0; i < sofarBattParamCount(); i++) {
+    publishBattParamReg(i);
+  }
+  if (okCount == 0) {
+    return;
+  }
+  if (lastSofar.battParams.valid) {
+    lastSofar.battParams.updatedMs = millis();
+  }
+}
+
+static bool battParamPollAllowed() {
+#if DUAL_BATT_ENABLE
+  if (dualBattBusy()) {
+    return false;
+  }
+#endif
+  return true;
+}
+
+static void energyMeterPublishTick() {
+  const uint32_t now = millis();
+  if ((now - lastEnergyPublishMs) < uint32_t(ENERGY_METER_PUBLISH_MS)) {
+    return;
+  }
+  if (isnan(lastEnergyImportWh) && isnan(lastEnergyExportWh)) {
+    return;
+  }
+  lastEnergyPublishMs = now;
+  if (!isnan(lastEnergyImportWh)) {
+    const String v = String(lastEnergyImportWh, 1);
+    mqttPublish("ess/energy_import_wh", v);
+    mqttPublish("grid_import_wh", v);
+  }
+  if (!isnan(lastEnergyExportWh)) {
+    const String v = String(lastEnergyExportWh, 1);
+    mqttPublish("ess/energy_export_wh", v);
+    mqttPublish("grid_export_wh", v);
+  }
+}
+
+static void battParamProbeFinish(uint32_t now) {
+  sofarBattParamBuildDiag(lastSofar.battParams);
+  lastBattParamPollMs = now;
+  battParamProbing = false;
+  battParamProbeIdx = 0;
+  publishBattParams();
+  Log.printf("[batt_param] probe done — %s\n%s\n",
+             lastSofar.battParams.pollDiag,
+             lastSofar.battParams.regDiag);
+}
+
+static void battParamPollTick(bool force = false) {
+#if !BATT_PARAM_ENABLE
+  static bool publishedDisabled = false;
+  if (!publishedDisabled) {
+    mqttPublish("batt_param/valid", "false", true);
+    mqttPublish("batt_param/poll_diag", "disabled", true);
+    publishedDisabled = true;
+  }
+  return;
+#else
+  const uint32_t now = millis();
+
+  if (!battParamProbing) {
+    const uint32_t interval =
+        lastSofar.battParams.valid ? uint32_t(BATT_PARAM_POLL_MS) : uint32_t(BATT_PARAM_RETRY_MS);
+    if (!force && !battParamPollNow && (now - lastBattParamPollMs) < interval) {
+      return;
+    }
+    if (!battParamPollAllowed()) {
+      if (battParamPollNow) {
+        publishBattParamDiag("skipped: dual_batt_busy");
+      }
+      return;
+    }
+    battParamPollNow = false;
+    lastSofar.battParams.pollAttempts++;
+    lastSofar.battParams.lastPollMs = now;
+    sofarBattParamProbeBegin(lastSofar.battParams);
+    battParamProbing = true;
+    battParamProbeIdx = 0;
+    lastBattParamRegMs = 0; // first register immediately
+    mqttPublish("batt_param/probe_progress", "0/" + String(sofarBattParamCount()));
+    Log.println("[batt_param] probe start");
+  }
+
+  if (!battParamPollAllowed()) {
+    return; // pause mid-cycle — resume when dual-batt idle
+  }
+  if (lastBattParamRegMs != 0 && (now - lastBattParamRegMs) < uint32_t(BATT_PARAM_REG_GAP_MS)) {
+    return;
+  }
+
+  const bool ok = sofarPollBatteryParamReg(lastSofar, battParamProbeIdx);
+  if (ok) {
+    lastSofarOk = true;
+  }
+  publishBattParamReg(battParamProbeIdx);
+  const SofarBattParamMeta* probed = sofarBattParamMeta(battParamProbeIdx);
+  Log.printf("[batt_param] 0x%04X %s\n",
+             probed ? unsigned(probed->reg) : unsigned(0x10B1 + battParamProbeIdx),
+             lastSofar.battParams.regWhy[battParamProbeIdx]);
+
+  battParamProbeIdx++;
+  lastBattParamRegMs = now;
+
+  if (battParamProbeIdx >= sofarBattParamCount()) {
+    battParamProbeFinish(now);
+  } else {
+    const uint8_t done = battParamProbeIdx;
+    mqttPublish("batt_param/probe_progress", String(done) + "/" + String(sofarBattParamCount()));
+  }
+#endif
+}
+
+static bool handleBattParamSet(const String& key, const String& msg) {
+#if !BATT_PARAM_ENABLE
+  Log.println("[batt_param] disabled at compile time");
+  return false;
+#else
+  const int8_t idx = sofarBattParamIndexByKey(key.c_str());
+  if (idx < 0) {
+    Log.printf("[batt_param] unknown key %s\n", key.c_str());
+    return false;
+  }
+  const SofarBattParamMeta* m = sofarBattParamMeta(uint8_t(idx));
+  if (!m || !m->writable) {
+    Log.printf("[batt_param] %s not writable\n", key.c_str());
+    return false;
+  }
+  uint16_t raw = 0;
+  if (!sofarBattParamScaledToRaw(uint8_t(idx), msg.toFloat(), raw)) {
+    Log.printf("[batt_param] %s scale failed\n", key.c_str());
+    return false;
+  }
+  if (!sofarBattParamValidateWrite(lastSofar.battParams, uint8_t(idx), raw)) {
+    Log.printf("[batt_param] %s raw=%u out of range\n", key.c_str(), raw);
+    return false;
+  }
+
+  const bool wasEss = essEnabled;
+  const int16_t resumeCmd = lastCmdW;
+  const SofarMode resumeMode = sofarLastMode();
+  sofarStandby();
+
+  const bool ok = sofarWriteBatteryParam(lastSofar, uint8_t(idx), raw);
+  if (!ok) {
+    publishBattParamDiag();
+    Log.printf("[batt_param] write %s failed (%s)\n", key.c_str(), lastSofar.lastError);
+    if (wasEss) {
+      if (resumeCmd > 0) {
+        sofarDischarge(uint16_t(resumeCmd));
+      } else if (resumeCmd < 0) {
+        sofarCharge(uint16_t(-resumeCmd));
+      }
+    } else if (resumeMode == SofarMode::Auto) {
+      sofarAuto();
+    }
+    return false;
+  }
+
+  publishBattParams();
+  lastBattParamPollMs = millis();
+
+  if (wasEss) {
+    if (resumeCmd > 0) {
+      sofarDischarge(uint16_t(resumeCmd));
+    } else if (resumeCmd < 0) {
+      sofarCharge(uint16_t(-resumeCmd));
+    }
+  } else if (resumeMode == SofarMode::Auto) {
+    sofarAuto();
+  }
+  Log.printf("[batt_param] %s set to %s (raw=%u)\n", key.c_str(), msg.c_str(), raw);
+  return true;
+#endif
 }
 
 #if DUAL_BATT_ENABLE
@@ -497,10 +808,11 @@ static bool dualBattRequestBank(uint8_t bank) {
 }
 
 static bool dualBattBankEmpty(uint8_t bank) {
+  const uint8_t emptyTh = essDischargeFloorSoc();
   if (bank == 2) {
-    return dualBattStickyEmptyB || (dualBattSocBValid && dualBattSocB <= dualBattEmptySoc);
+    return dualBattStickyEmptyB || (dualBattSocBValid && dualBattSocB <= emptyTh);
   }
-  return dualBattStickyEmptyA || (dualBattSocAValid && dualBattSocA <= dualBattEmptySoc);
+  return dualBattStickyEmptyA || (dualBattSocAValid && dualBattSocA <= emptyTh);
 }
 
 static bool dualBattBankFull(uint8_t bank) {
@@ -1128,6 +1440,76 @@ static void publishHaDiscovery() {
     haPublishConfig("number", n.objectId, payload);
   }
 
+#if BATT_PARAM_ENABLE
+  for (uint8_t i = 0; i < sofarBattParamCount(); i++) {
+    const SofarBattParamMeta* m = sofarBattParamMeta(i);
+    if (!m || !m->writable) {
+      continue;
+    }
+    JsonDocument doc;
+    doc["name"] = m->haName;
+    char objectId[64];
+    snprintf(objectId, sizeof(objectId), "batt_param_%s", m->key);
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_%s", DEVICE_NAME, objectId);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = String(DEVICE_NAME) + "/batt_param/" + m->key;
+    doc["command_topic"] = String(DEVICE_NAME) + "/set/batt_param/" + m->key;
+    doc["min"] = float(m->rawMin) * m->scale;
+    doc["max"] = float(m->rawMax) * m->scale;
+    doc["step"] = m->step;
+    if (m->unit[0]) {
+      doc["unit_of_measurement"] = m->unit;
+    }
+    doc["mode"] = "box";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("number", objectId, payload);
+  }
+
+  {
+    JsonDocument doc;
+    doc["name"] = "Battery Params Valid";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_batt_param_valid", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = String(DEVICE_NAME) + "/batt_param/valid";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    doc["payload_on"] = "true";
+    doc["payload_off"] = "false";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("binary_sensor", "batt_param_valid", payload);
+  }
+
+  {
+    JsonDocument doc;
+    doc["name"] = "Battery Params Poll Diag";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_batt_param_poll_diag", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = String(DEVICE_NAME) + "/batt_param/poll_diag";
+    doc["icon"] = "mdi:bug-outline";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("sensor", "batt_param_poll_diag", payload);
+  }
+#endif
+
   // Charge target SOC (manual charge stops at this %)
   {
     JsonDocument doc;
@@ -1500,7 +1882,8 @@ static void followTick() {
     followHandleLimit(false);
     return;
   }
-  if (wantDischarge && (sofarDischargeProhibited() || (socOk && soc <= FOLLOW_EMPTY_SOC))) {
+  if (wantDischarge &&
+      (sofarDischargeProhibited() || (socOk && soc <= essDischargeFloorSoc()))) {
     followHandleLimit(true);
     return;
   }
@@ -1676,6 +2059,13 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
+  const String battPrefix = String(DEVICE_NAME) + "/set/batt_param/";
+  if (t.startsWith(battPrefix)) {
+    const String key = t.substring(battPrefix.length());
+    handleBattParamSet(key, msg);
+    return;
+  }
+
   const String cmd = t.substring(t.lastIndexOf('/') + 1);
 
   if (cmd == "ess") {
@@ -1699,6 +2089,12 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       essEnabled = true;
     }
     mqttPublish("ess/enabled", essEnabled ? "true" : "false", true);
+    nvsPutBool("ess_en", essEnabled);
+    if (msg == "charge_only" || msg == "excess" || msg == "battery_save") {
+      nvsPutBool("chg_only", essChargeOnlyUser);
+    } else if (msg == "full" || msg == "bidirectional") {
+      nvsPutBool("chg_only", essChargeOnlyUser);
+    }
     publishEssParams();
     return;
   }
@@ -1709,6 +2105,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       essIntegral = 0.0f;
     }
     Log.printf("[ess] charge_only=%d\n", int(essChargeOnlyUser));
+    nvsPutBool("chg_only", essChargeOnlyUser);
     publishEssParams();
     return;
   }
@@ -1720,6 +2117,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       essSocFullActive = false;
     }
     Log.printf("[ess] soc_protect=%d\n", int(essSocProtectEnabled));
+    nvsPutBool("soc_prot_en", essSocProtectEnabled);
     publishEssParams();
     return;
   }
@@ -1728,7 +2126,15 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     const int v = msg.toInt();
     if (v >= 1 && v <= 100) {
       essSocProtectLow = uint8_t(v);
+#if DUAL_BATT_ENABLE
+      if (essSocProtectEnabled && dualBattEmptySoc > essSocProtectLow) {
+        dualBattEmptySoc = essSocProtectLow;
+        nvsPutU8("db_empty", dualBattEmptySoc);
+        mqttPublish("battery/empty", String(dualBattEmptySoc), true);
+      }
+#endif
       Log.printf("[ess] soc_protect_low=%u\n", essSocProtectLow);
+      nvsPutU8("soc_lo", essSocProtectLow);
       publishEssParams();
     } else {
       Log.println("[ess] soc_protect_low out of range (1..100)");
@@ -1741,6 +2147,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (v >= 0 && v <= 30) {
       essSocProtectHyst = uint8_t(v);
       Log.printf("[ess] soc_protect_hyst=%u\n", essSocProtectHyst);
+      nvsPutU8("soc_hyst", essSocProtectHyst);
       publishEssParams();
     } else {
       Log.println("[ess] soc_protect_hyst out of range (0..30)");
@@ -1753,6 +2160,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (v >= 50 && v <= 100) {
       essSocProtectHigh = uint8_t(v);
       Log.printf("[ess] soc_protect_high=%u\n", essSocProtectHigh);
+      nvsPutU8("soc_hi", essSocProtectHigh);
       publishEssParams();
     } else {
       Log.println("[ess] soc_protect_high out of range (50..100)");
@@ -1765,6 +2173,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (v >= 0 && v <= 30) {
       essSocProtectHighHyst = uint8_t(v);
       Log.printf("[ess] soc_protect_high_hyst=%u\n", essSocProtectHighHyst);
+      nvsPutU8("soc_hi_hyst", essSocProtectHighHyst);
       publishEssParams();
     } else {
       Log.println("[ess] soc_protect_high_hyst out of range (0..30)");
@@ -1777,6 +2186,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (v >= 0.0f && v <= 5.0f) {
       essKp = v;
       Log.printf("[ess] kp=%.3f\n", essKp);
+      nvsPutFloat("kp", essKp);
       publishEssParams();
     } else {
       Log.println("[ess] kp out of range (0..5)");
@@ -1789,6 +2199,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (v >= 0.0f && v <= 5.0f) {
       essKi = v;
       Log.printf("[ess] ki=%.3f\n", essKi);
+      nvsPutFloat("ki", essKi);
       publishEssParams();
     } else {
       Log.println("[ess] ki out of range (0..5)");
@@ -1801,6 +2212,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (v >= 0.0f && v <= 500.0f) {
       essDeadbandW = v;
       Log.printf("[ess] deadband=%.1fW\n", essDeadbandW);
+      nvsPutFloat("deadband", essDeadbandW);
       publishEssParams();
     } else {
       Log.println("[ess] deadband out of range (0..500)");
@@ -1813,6 +2225,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (v >= 0.0f && v <= 500.0f) {
       essMinDeltaW = v;
       Log.printf("[ess] min_delta=%.1fW\n", essMinDeltaW);
+      nvsPutFloat("min_delta", essMinDeltaW);
       publishEssParams();
     } else {
       Log.println("[ess] min_delta out of range (0..500)");
@@ -1825,6 +2238,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (v >= 1 && v <= int(MAX_POWER_W)) {
       essHoldMinW = uint16_t(v);
       Log.printf("[ess] hold_min=%uW\n", essHoldMinW);
+      nvsPutU16("hold_min", essHoldMinW);
       publishEssParams();
     } else {
       Log.println("[ess] hold_min out of range");
@@ -1844,6 +2258,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (v >= 0 && v <= 100) {
       chargeTargetSoc = uint8_t(v);
       Log.printf("[charge] target_soc=%u\n", chargeTargetSoc);
+      nvsPutU8("chg_tgt", chargeTargetSoc);
       publishChargeTargetSoc();
     } else {
       Log.println("[charge] target_soc out of range (0..100)");
@@ -1855,6 +2270,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (cmd == "dual_batt" || cmd == "dual_batt_enabled") {
     dualBattEnabled = (msg != "false" && msg != "0" && msg != "off");
     Log.printf("[dual] enabled=%d\n", int(dualBattEnabled));
+    nvsPutBool("db_en", dualBattEnabled);
     publishDualBatt();
     return;
   }
@@ -1864,6 +2280,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (v >= 0 && v <= 100) {
       dualBattEmptySoc = uint8_t(v);
       Log.printf("[dual] empty=%u\n", dualBattEmptySoc);
+      nvsPutU8("db_empty", dualBattEmptySoc);
       publishDualBatt();
     } else {
       Log.println("[dual] empty out of range (0..100)");
@@ -1876,6 +2293,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (v >= 0 && v <= 100) {
       dualBattFullSoc = uint8_t(v);
       Log.printf("[dual] full=%u\n", dualBattFullSoc);
+      nvsPutU8("db_full", dualBattFullSoc);
       publishDualBatt();
     } else {
       Log.println("[dual] full out of range (0..100)");
@@ -1890,6 +2308,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       return;
     }
     dualBattForce = bank; // 0=auto
+    nvsPutU8("db_force", dualBattForce);
     publishDualBatt();
     if (bank == 0) {
       Log.println("[dual] force cleared — auto policy");
@@ -1969,6 +2388,8 @@ static void ensureMqtt() {
 #if DUAL_BATT_ENABLE
   publishDualBatt();
 #endif
+  battParamPollNow = true;
+  lastEnergyPublishMs = 0;
 #if HA_MQTT_DISCOVERY
   haDiscoverySent = false;
   publishHaDiscovery();
@@ -2119,6 +2540,8 @@ static void publishState() {
   json += dualBattEnabled ? "true" : "false";
   json += ",\"battery_empty_soc\":";
   json += String(dualBattEmptySoc);
+  json += ",\"ess_discharge_floor_soc\":";
+  json += String(essDischargeFloorSoc());
   json += ",\"battery_full_soc\":";
   json += String(dualBattFullSoc);
   json += ",\"battery_a_soc\":";
@@ -2202,6 +2625,46 @@ static void publishState() {
   }
   json += ",\"pv_today_kwh\":";
   json += lastSofar.pvTodayValid ? String(lastSofar.pvTodayKwh, 2) : String("null");
+  json += ",\"batt_param_valid\":";
+  json += lastSofar.battParams.valid ? "true" : "false";
+  json += ",\"batt_param_poll_diag\":\"";
+  json += lastSofar.battParams.pollDiag;
+  json += "\",\"batt_param_reg_diag\":\"";
+  json += lastSofar.battParams.regDiag;
+  json += "\",\"batt_param_probe_progress\":\"";
+  json += String(sofarBattParamOkCount(lastSofar.battParams));
+  json += "/";
+  json += String(sofarBattParamCount());
+  json += "\",\"batt_param_poll_attempts\":";
+  json += String(lastSofar.battParams.pollAttempts);
+  json += ",\"batt_param_last_error\":\"";
+  json += lastSofar.lastError;
+  json += "\"";
+  for (uint8_t i = 0; i < sofarBattParamCount(); i++) {
+    const SofarBattParamMeta* m = sofarBattParamMeta(i);
+    if (!m) {
+      continue;
+    }
+    char regKey[24];
+    snprintf(regKey, sizeof(regKey), "batt_param_reg_%04x", m->reg);
+    json += ",\"";
+    json += regKey;
+    json += "\":\"";
+    json += lastSofar.battParams.regWhy[i][0] ? lastSofar.battParams.regWhy[i] : "?";
+    json += "\"";
+    if (!lastSofar.battParams.regOk[i]) {
+      continue;
+    }
+    json += ",\"batt_param_";
+    json += m->key;
+    json += "\":";
+    const float scaled = sofarBattParamScaled(lastSofar.battParams, i);
+    if (m->decimals == 0) {
+      json += String(lroundf(scaled));
+    } else {
+      json += String(scaled, unsigned(m->decimals));
+    }
+  }
   if (lastSofar.faultValid) {
     char hex[48];
     snprintf(hex,
@@ -2328,6 +2791,7 @@ void setup() {
   Log.println();
   Log.println("=== sofar_ess (ESP32-C3 + Sofar HW UART + MycilaJSY) ===");
 
+  loadSettingsFromNvs();
   sofarBegin(Serial0);
   jsyReady = startJsy();
   digitalWrite(STATUS_LED_PIN, jsyReady ? HIGH : LOW);
@@ -2338,7 +2802,7 @@ void setup() {
 #endif
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(mqttCallback);
-  mqtt.setBufferSize(2048);
+  mqtt.setBufferSize(4096); // state JSON ~2.5–3 kB with batt_param reg_diag fields
   mqtt.setKeepAlive(30);
 
   sofarHeartbeat();
@@ -2394,8 +2858,6 @@ void loop() {
                  snap.energyImportWh,
                  snap.energyExportWh);
       mqttPublish("ess/grid_power", String(snap.activePower, 1));
-      mqttPublish("ess/energy_import_wh", String(snap.energyImportWh, 1));
-      mqttPublish("ess/energy_export_wh", String(snap.energyExportWh, 1));
       if (essEnabled) {
         applyEss(snap.activePower);
       }
@@ -2427,6 +2889,9 @@ void loop() {
 #endif
     followTick();
   }
+
+  energyMeterPublishTick();
+  battParamPollTick();
 
   if (now - lastMqttStateMs >= MQTT_STATE_INTERVAL_MS) {
     lastMqttStateMs = now;
