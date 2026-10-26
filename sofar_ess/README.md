@@ -301,9 +301,10 @@ Setup:
 Behaviour (when automation is on):
 
 - **00:30** — lock overnight target SOC; pick charge / standby / ESS from SOC vs target  
-- **SOC < target** — force charge  
-- **target … target+2%** — standby (grid only; no battery charge/discharge)  
-- **SOC > target+2%** — full ESS  
+- **SOC < target − margin** — force charge (no ESS)  
+- **SOC at target ± margin** — standby (no ESS, no charge)  
+- **SOC > target + margin** — full ESS until trimmed back to target, then standby  
+- Control SOC uses **connected inverter SOC** (`sensor.smart_charge_control_soc`), not combined A+B  
 - **05:30** — restore full ESS for the rest of the day  
 - **Outside cheap window** — full bidirectional ESS whenever automation is enabled  
 - **Enable mid-window** — re-evaluate and charge / hold / ESS  
