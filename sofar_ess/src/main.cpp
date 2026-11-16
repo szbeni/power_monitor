@@ -32,6 +32,16 @@ static WiFiClient wifi;
 static PubSubClient mqtt(wifi);
 
 static bool essEnabled = ESS_ENABLE;
+// EPS switch (HA / set/eps). When on and grid is lost, send 0x41 enable.
+static bool epsEnabled = EPS_ENABLE_DEFAULT;
+enum class EpsApplied : uint8_t { Unknown, Enable, Disable };
+static EpsApplied epsApplied = EpsApplied::Unknown;
+static uint32_t epsLastSendMs = 0;
+static bool gridDown = false;      // from inverter grid voltage (epsUpdateGridState)
+static float gridVoltageV = NAN;   // inverter grid A voltage, NAN if stale
+static uint32_t lastGridSampleMs = 0;
+static uint8_t gridLowCount = 0;
+static uint8_t gridHighCount = 0;
 static bool essChargeOnlyUser = ESS_CHARGE_ONLY;
 static bool essSocProtectEnabled = ESS_SOC_PROTECT_ENABLE;
 static uint8_t essSocProtectLow = ESS_SOC_PROTECT_LOW;
@@ -194,6 +204,7 @@ static void loadSettingsFromNvs() {
   }
   essEnabled = nvsPrefs.getBool("ess_en", essEnabled);
   essChargeOnlyUser = nvsPrefs.getBool("chg_only", essChargeOnlyUser);
+  epsEnabled = nvsPrefs.getBool("eps_en", epsEnabled);
   essSocProtectEnabled = nvsPrefs.getBool("soc_prot_en", essSocProtectEnabled);
   essSocProtectLow = nvsPrefs.getUChar("soc_lo", essSocProtectLow);
   essSocProtectHyst = nvsPrefs.getUChar("soc_hyst", essSocProtectHyst);
@@ -1103,6 +1114,8 @@ struct HaSensor {
 
 static const HaSensor kHaSensors[] = {
     {"grid_power", "Grid Power", "{{ value_json.grid_power_w }}", "W", "power", "measurement"},
+    {"grid_voltage", "Grid Voltage", "{{ value_json.grid_voltage_v }}", "V", "voltage", "measurement"},
+    {"grid_frequency", "Grid Frequency", "{{ value_json.grid_frequency_hz }}", "Hz", "frequency", "measurement"},
     {"charge_discharge_power",
      "Charge/Discharge Power",
      "{{ value_json.charge_discharge_power_w }}",
@@ -1211,7 +1224,7 @@ static void publishHaDiscovery() {
     snprintf(uniqueId, sizeof(uniqueId), "%s_sofar_ok", DEVICE_NAME);
     doc["unique_id"] = uniqueId;
     doc["state_topic"] = stateTopic;
-    doc["value_template"] = "{{ value_json.sofar_ok }}";
+    doc["value_template"] = "{{ 'true' if value_json.sofar_ok else 'false' }}";
     doc["payload_on"] = "true";
     doc["payload_off"] = "false";
     doc["device_class"] = "connectivity";
@@ -1233,7 +1246,7 @@ static void publishHaDiscovery() {
     snprintf(uniqueId, sizeof(uniqueId), "%s_sofar_fault_active", DEVICE_NAME);
     doc["unique_id"] = uniqueId;
     doc["state_topic"] = stateTopic;
-    doc["value_template"] = "{{ value_json.fault_active }}";
+    doc["value_template"] = "{{ 'true' if value_json.fault_active else 'false' }}";
     doc["payload_on"] = "true";
     doc["payload_off"] = "false";
     doc["device_class"] = "problem";
@@ -1254,7 +1267,7 @@ static void publishHaDiscovery() {
     snprintf(uniqueId, sizeof(uniqueId), "%s_follow_ok", DEVICE_NAME);
     doc["unique_id"] = uniqueId;
     doc["state_topic"] = stateTopic;
-    doc["value_template"] = "{{ value_json.follow_ok }}";
+    doc["value_template"] = "{{ 'true' if value_json.follow_ok else 'false' }}";
     doc["payload_on"] = "true";
     doc["payload_off"] = "false";
     doc["availability_topic"] = availTopic;
@@ -1274,7 +1287,7 @@ static void publishHaDiscovery() {
     snprintf(uniqueId, sizeof(uniqueId), "%s_follow_grace", DEVICE_NAME);
     doc["unique_id"] = uniqueId;
     doc["state_topic"] = stateTopic;
-    doc["value_template"] = "{{ value_json.follow_grace }}";
+    doc["value_template"] = "{{ 'true' if value_json.follow_grace else 'false' }}";
     doc["payload_on"] = "true";
     doc["payload_off"] = "false";
     doc["availability_topic"] = availTopic;
@@ -1306,6 +1319,50 @@ static void publishHaDiscovery() {
     String payload;
     serializeJson(doc, payload);
     haPublishConfig("switch", "ess_enabled", payload);
+  }
+
+  // EPS switch: on = enable backup output when grid is lost; off = disable
+  {
+    JsonDocument doc;
+    doc["name"] = "EPS Enabled";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_eps_enabled", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = String(DEVICE_NAME) + "/ess/eps_enabled";
+    doc["command_topic"] = String(DEVICE_NAME) + "/set/eps";
+    doc["payload_on"] = "true";
+    doc["payload_off"] = "false";
+    doc["icon"] = "mdi:power-plug-battery";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("switch", "eps_enabled", payload);
+  }
+
+  // Grid lost, from inverter grid voltage (see epsUpdateGridState)
+  {
+    JsonDocument doc;
+    doc["name"] = "Grid Down";
+    char uniqueId[96];
+    snprintf(uniqueId, sizeof(uniqueId), "%s_grid_down", DEVICE_NAME);
+    doc["unique_id"] = uniqueId;
+    doc["state_topic"] = stateTopic;
+    doc["value_template"] = "{{ 'true' if value_json.grid_down else 'false' }}";
+    doc["payload_on"] = "true";
+    doc["payload_off"] = "false";
+    doc["device_class"] = "problem";
+    doc["availability_topic"] = availTopic;
+    doc["payload_available"] = "online";
+    doc["payload_not_available"] = "offline";
+    haFillDevice(doc["device"].to<JsonObject>());
+
+    String payload;
+    serializeJson(doc, payload);
+    haPublishConfig("binary_sensor", "grid_down", payload);
   }
 
   // Charge-only: soak export, never discharge
@@ -2037,6 +2094,74 @@ static void applyEss(float gridPowerW) {
   mqttPublish("ess/charge_discharge_power", String(lastSofar.chargeDischargePowerW));
 }
 
+// --- EPS (backup output, Sofar function 0x41) ---------------------------------
+
+static void epsPublishState() {
+  mqttPublish("ess/eps_enabled", epsEnabled ? "true" : "false", true);
+}
+
+// Send 0x41 and remember what the inverter was last told.
+static bool epsSendFrame(bool enable) {
+  epsApplied = enable ? EpsApplied::Enable : EpsApplied::Disable;
+  epsLastSendMs = millis();
+  return sofarSetEps(enable);
+}
+
+// Grid state from the inverter's own grid A voltage (0x0206). Lost after
+// EPS_GRID_DEBOUNCE consecutive reads below EPS_GRID_LOST_V; back after the same
+// count above EPS_GRID_RETURN_V. Stale or missing readings leave the state unchanged.
+static void epsUpdateGridState() {
+  if (!lastSofar.gridVoltageValid || millis() - lastSofar.gridVoltageMs > EPS_GRID_STALE_MS) {
+    gridVoltageV = NAN;
+    return;
+  }
+  const float v = lastSofar.gridVoltageV;
+  if (lastSofar.gridVoltageMs == lastGridSampleMs) {
+    return; // no new reading since the last ESS cycle
+  }
+  lastGridSampleMs = lastSofar.gridVoltageMs;
+  gridVoltageV = v;
+
+  if (!gridDown) {
+    gridHighCount = 0;
+    gridLowCount = (v < EPS_GRID_LOST_V) ? uint8_t(gridLowCount + 1) : 0;
+    if (gridLowCount >= EPS_GRID_DEBOUNCE) {
+      gridDown = true;
+      gridLowCount = 0;
+      epsApplied = EpsApplied::Unknown; // new outage: enable right away
+      Log.printf("[eps] grid lost (inverter %.1f V)\n", v);
+    }
+  } else {
+    gridLowCount = 0;
+    gridHighCount = (v > EPS_GRID_RETURN_V) ? uint8_t(gridHighCount + 1) : 0;
+    if (gridHighCount >= EPS_GRID_DEBOUNCE) {
+      gridDown = false;
+      gridHighCount = 0;
+      Log.printf("[eps] grid back (inverter %.1f V)\n", v);
+    }
+  }
+}
+
+// Every ESS cycle. Switch off → send disable. Switch on + grid lost → send enable,
+// re-sent every EPS_RESEND_INTERVAL_MS while the outage lasts.
+static void epsTick() {
+  epsUpdateGridState();
+
+  if (!epsEnabled) {
+    if (epsApplied != EpsApplied::Disable) {
+      epsSendFrame(false);
+    }
+    return;
+  }
+  if (!gridDown) {
+    return;
+  }
+  if (epsApplied == EpsApplied::Enable && millis() - epsLastSendMs < EPS_RESEND_INTERVAL_MS) {
+    return;
+  }
+  epsSendFrame(true);
+}
+
 static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String msg;
   msg.reserve(length + 1);
@@ -2322,6 +2447,22 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 #endif
 
+  // EPS switch: persisted; epsTick() enforces it (on + grid lost → enable, off → disable).
+  if (cmd == "eps") {
+    epsEnabled = !(msg == "false" || msg == "0" || msg == "off");
+    nvsPutBool("eps_en", epsEnabled);
+    epsPublishState();
+    Log.printf("[eps] switch=%d\n", int(epsEnabled));
+    return;
+  }
+
+  // EPS messages: do not change ESS state. Reply on response/eps_enable|eps_disable.
+  if (cmd == "eps_enable" || cmd == "eps_disable") {
+    const bool okEps = epsSendFrame(cmd == "eps_enable");
+    mqttPublish((String("response/") + cmd).c_str(), okEps ? "0" : "1");
+    return;
+  }
+
   // Manual Sofar2mqtt-compatible overrides disable ESS until re-enabled
   const int value = msg.toInt();
   bool handled = false;
@@ -2383,6 +2524,7 @@ static void ensureMqtt() {
   mqtt.subscribe((String(DUAL_BATT_SELECTOR_TOPIC) + "/selected").c_str());
 #endif
   mqttPublish("ess/enabled", essEnabled ? "true" : "false", true);
+  epsPublishState();
   publishEssParams();
   publishChargeTargetSoc();
 #if DUAL_BATT_ENABLE
@@ -2558,6 +2700,14 @@ static void publishState() {
   json += ",\"battery_b_kwh\":";
   json += String(DUAL_BATT_B_KWH, 1);
 #endif
+  json += ",\"eps_enabled\":";
+  json += epsEnabled ? "true" : "false";
+  json += ",\"grid_down\":";
+  json += gridDown ? "true" : "false";
+  json += ",\"grid_voltage_v\":";
+  json += isnan(gridVoltageV) ? String("null") : String(gridVoltageV, 1);
+  json += ",\"grid_frequency_hz\":";
+  json += lastSofar.gridFreqValid ? String(lastSofar.gridFreqHz, 2) : String("null");
   json += ",\"sofar_ok\":";
   json += lastSofarOk ? "true" : "false";
   json += ",\"sofar_last_error\":\"";
@@ -2887,6 +3037,7 @@ void loop() {
 #if DUAL_BATT_ENABLE
     }
 #endif
+    epsTick();
     followTick();
   }
 

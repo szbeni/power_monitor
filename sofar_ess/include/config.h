@@ -101,6 +101,32 @@
 #define ESS_LOOP_INTERVAL_MS 500
 #endif
 
+// EPS (backup output) via function 0x41. Switch default on: when grid is lost
+// (JSY voltage low) EPS is enabled; switch off sends disable.
+#ifndef EPS_ENABLE_DEFAULT
+#define EPS_ENABLE_DEFAULT 1
+#endif
+// Grid lost = inverter grid A voltage (0x0206) below EPS_GRID_LOST_V for
+// EPS_GRID_DEBOUNCE consecutive reads. Back = above EPS_GRID_RETURN_V for the same count.
+// Readings older than EPS_GRID_STALE_MS leave the grid state unchanged.
+#ifndef EPS_GRID_LOST_V
+#define EPS_GRID_LOST_V 180.0f
+#endif
+#ifndef EPS_GRID_RETURN_V
+#define EPS_GRID_RETURN_V 200.0f
+#endif
+#ifndef EPS_GRID_DEBOUNCE
+#define EPS_GRID_DEBOUNCE 2
+#endif
+#ifndef EPS_GRID_STALE_MS
+#define EPS_GRID_STALE_MS 15000
+#endif
+// While grid is lost and EPS is wanted, re-send enable this often (ms), in case
+// the inverter drops EPS (forum: Passive mode resets it).
+#ifndef EPS_RESEND_INTERVAL_MS
+#define EPS_RESEND_INTERVAL_MS 30000
+#endif
+
 // Battery profile 0x10B1–0x10BC (FC 0x04/0x03). Many ME3000SP units reject these
 // addresses — leave off unless you know your inverter supports them.
 // ME3000SP rejects entire 0x10B1–0x10BC map (FC04=no-rx, FC03=exception).

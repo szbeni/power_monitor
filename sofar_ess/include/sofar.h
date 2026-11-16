@@ -67,6 +67,13 @@ struct SofarStatus {
   float pvTodayKwh = 0.0f;
   bool pvTodayValid = false;
 
+  // Inverter grid (A phase) voltage 0x0206 (×0.1 V) and frequency 0x020C (×0.01 Hz).
+  float gridVoltageV = 0.0f;
+  bool gridVoltageValid = false;
+  uint32_t gridVoltageMs = 0;
+  float gridFreqHz = 0.0f;
+  bool gridFreqValid = false;
+
   // Battery profile settings 0x10B1–0x10BC (FC 0x04 read / FC 0x13 write).
   SofarBatteryParams battParams;
 
@@ -96,6 +103,7 @@ bool sofarBegin(HardwareSerial& bus);
 void sofarHeartbeat();
 bool sofarStandby();
 bool sofarAuto();
+bool sofarSetEps(bool enable);
 bool sofarCharge(uint16_t watts);
 bool sofarDischarge(uint16_t watts);
 // Read one status register into cache (round-robin). Non-blocking aside from one Modbus txn.
@@ -127,7 +135,6 @@ const char* sofarRunStateName(uint16_t runState);
 size_t sofarFormatFaults(const SofarStatus& s, char* out, size_t outLen);
 size_t sofarFormatAlerts(const SofarStatus& s, char* out, size_t outLen);
 size_t sofarFormatBattFaults(const SofarStatus& s, char* out, size_t outLen);
-
 // Battery profile 0x10B1–0x10BC (hybrid map, FC 0x04/0x13).
 void sofarBattParamProbeBegin(SofarBatteryParams& p);
 bool sofarPollBatteryParamReg(SofarStatus& cache, uint8_t index);

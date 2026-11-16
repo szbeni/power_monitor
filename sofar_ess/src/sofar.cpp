@@ -29,6 +29,8 @@ constexpr uint16_t REG_FAULT1 = 0x0201;   // fault bytes 0–1 … through REG_F
 constexpr uint16_t REG_BATTW = 0x020d;
 constexpr uint16_t REG_BATTSOC = 0x0210;
 constexpr uint16_t REG_GRIDW = 0x0212;
+constexpr uint16_t REG_GRID_V_A = 0x0206; // grid A voltage ×0.1 V
+constexpr uint16_t REG_GRID_F = 0x020c;   // grid frequency ×0.01 Hz
 constexpr uint16_t REG_PVDAY = 0x0218;    // today generation ×0.01 kWh
 constexpr uint16_t REG_ALERT = 0x022b;
 constexpr uint16_t REG_BATTFAULT1 = 0x023d; // batt fault bytes 0–1 … +4
@@ -558,6 +560,21 @@ bool sofarAuto() {
   return ok;
 }
 
+// EPS enable/disable via function 0x41, register 0x0000, value 0x0055 (enable) or
+// 0x00AA (disable). Taken from a forum report, not from the protocol PDF. The reply
+// is not in the standard format, so a non-standard reply counts as a failure.
+bool sofarSetEps(bool enable) {
+  uint8_t frame[] = {SOFAR_SLAVE_ID, 0x41, 0x00, 0x00, 0x00, 0x01, 0x00,
+                     uint8_t(enable ? 0x55 : 0xAA), 0, 0};
+  Resp rs;
+  const bool ok = sendRaw(frame, sizeof(frame), &rs, 0x41);
+  Log.printf("[eps] 0x41 %s -> %s (%s)\n",
+             enable ? "enable" : "disable",
+             ok ? "ok" : "FAIL",
+             listenFailWhy_);
+  return ok;
+}
+
 bool sofarCharge(uint16_t watts) {
   if (watts == 0 || watts > MAX_POWER_W) {
     return false;
@@ -730,7 +747,7 @@ bool sofarPollSocNow(SofarStatus& cache) {
 bool sofarPollStatusField(SofarStatus& cache) {
   // One Modbus txn per call so ESS timing stays predictable.
   // Phases: run → grid → batt(W/V/I) → soc → fault[5] → alert → battFault[5]
-  //         → pv strings[6] → pv today. PV is low-priority telemetry.
+  //         → pv strings[6] → grid V → grid F → pv today. PV is low-priority telemetry.
   static uint8_t phase = 0;
   static uint8_t failStreak = 0;
   uint16_t v = 0;
@@ -741,7 +758,7 @@ bool sofarPollStatusField(SofarStatus& cache) {
     phase = 3;
   }
 
-  switch (phase % 9) {
+  switch (phase % 11) {
     case 0:
       ok = readReg(REG_RUNSTATE, v);
       if (ok) {
@@ -847,6 +864,21 @@ bool sofarPollStatusField(SofarStatus& cache) {
       }
       break;
     }
+    case 8:
+      ok = readReg(REG_GRID_V_A, v);
+      if (ok) {
+        cache.gridVoltageV = float(v) * 0.1f;
+        cache.gridVoltageValid = true;
+        cache.gridVoltageMs = millis();
+      }
+      break;
+    case 9:
+      ok = readReg(REG_GRID_F, v);
+      if (ok) {
+        cache.gridFreqHz = float(v) * 0.01f;
+        cache.gridFreqValid = true;
+      }
+      break;
     default:
       ok = readReg(REG_PVDAY, v);
       if (ok) {
