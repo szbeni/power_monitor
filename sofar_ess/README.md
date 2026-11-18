@@ -26,7 +26,7 @@ Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator fr
 
 **Settings persistence:** ESS tuning (`kp`, `soc_protect_*`, etc.) and dual-battery thresholds are saved to ESP32 NVS on change and restored on boot.
 
-**Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). A pack also counts as full once high-SOC protect latches on it, or once it stops accepting more than `FOLLOW_TAPER_MIN_W` (150 W) of a much larger charge command — tapering to a lower power near the top is normal charging and does not hand over. Force a bank via `set/battery`. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle (`DUAL_BATT_SETTLE_MS`, 15 s) → invalidate SOC → re-poll until confirmed.
+**Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). With a manual charge target set, a bank that reaches the target counts as done for handover, so charging moves to the other bank until combined SOC reaches the target (no bounce back to a bank already at target). A pack also counts as full once high-SOC protect latches on it, or once it stops accepting more than `FOLLOW_TAPER_MIN_W` (150 W) of a much larger charge command — tapering to a lower power near the top is normal charging and does not hand over. Force a bank via `set/battery`. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle (`DUAL_BATT_SETTLE_MS`, 15 s) → invalidate SOC → re-poll until confirmed.
 
 **SOC validation** (why a bank switch no longer reports a bogus SOC): a mis-paired Modbus reply is indistinguishable from a real register value, so SOC is filtered three ways.
 
@@ -186,7 +186,7 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/set/standby` | sub | `true` — force standby (battery idle). **Disables ESS** |
 | `…/set/auto` | sub | `true` — Sofar auto (inverter self-control). **Disables ESS** |
 | `…/set/charge` | sub | watts (1…MAX) — force charge. **Disables ESS** |
-| `…/set/charge_target_soc` | sub | int 0…100 — stop manual charge at this SOC and go standby (0 = no limit) |
+| `…/set/charge_target_soc` | sub | int 0…100 — pack-wide (combined) target. When the active bank reaches it while combined is short, hand over to the other bank and keep charging; go standby once combined reaches it (0 = no limit) |
 | `…/charge/target_soc` | pub | Current charge target SOC % (retained; 0 = no limit) |
 | `…/set/discharge` | sub | watts (1…MAX) — force discharge. **Disables ESS** |
 | `…/response/<cmd>` | pub | `0` = OK after a manual set command |
@@ -301,10 +301,10 @@ Setup:
 Behaviour (when automation is on):
 
 - **00:30** — lock overnight target SOC; pick charge / standby / ESS from SOC vs target  
-- **SOC < target − margin** — force charge (no ESS)  
-- **SOC at target ± margin** — standby (no ESS, no charge)  
+- **SOC < target** — force charge (no ESS)  
+- **target ≤ SOC ≤ target + margin** — standby (no ESS, no charge). Standby only once combined SOC reaches the target; a bank at target with combined still short hands over to the other bank first  
 - **SOC > target + margin** — full ESS until trimmed back to target, then standby  
-- Control SOC uses **connected inverter SOC** (`sensor.smart_charge_control_soc`), not combined A+B  
+- Decisions use **combined SOC** (`sensor.smart_charge_battery_soc`, both banks). Connected SOC is only a fallback. While combined is unavailable (other bank not yet seen), the charge band is used and the firmware handles the handover  
 - **05:30** — restore full ESS for the rest of the day  
 - **Outside cheap window** — full bidirectional ESS whenever automation is enabled  
 - **Enable mid-window** — re-evaluate and charge / hold / ESS  
@@ -314,7 +314,7 @@ Behaviour (when automation is on):
 - **~23:50** — blend learned demand from estimated house load energy  
 - **~23:55** — nudge forecast correction from OpenDTU daily yield vs morning forecast  
 
-Defaults: min SOC 20%, max overnight 80%, charge 2500 W. Formula:  
+Overnight settings (min / max SOC and the other smart-charge numbers) persist across HA restarts. Min and max SOC each accept 0–100%. Defaults apply only to settings that have never been saved, seeded once on first start by `smart_charge_seed_defaults`, guarded by `input_boolean.smart_charge_defaults_seeded`: min SOC 60%, max overnight 90%, capacity 15 kWh, charge 2500 W, demand 12 kWh, correction 1.0, margin 1%, locked target 20%. To keep current values when first deploying, turn the sentinel on before the first restart. Formula:  
 `target% = clamp(max(min%, (demand − forecast×correction) / capacity × 100), max%)` — sunny days stay near min; cloudy days raise the overnight SOC.
 
 ## PlotJuggler

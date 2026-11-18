@@ -837,6 +837,25 @@ static bool dualBattBankKnown(uint8_t bank) {
   return bank == 2 ? dualBattSocBValid : dualBattSocAValid;
 }
 
+// Charge-side "done" for handover: physically full, or at the manual charge
+// target. The target check is live and not sticky, so the pack can still be
+// charged toward dualBattFullSoc later (daytime ESS).
+static bool dualBattBankChargeDone(uint8_t bank) {
+  if (dualBattBankFull(bank)) {
+    return true;
+  }
+  if (chargeTargetSoc == 0 || !dualBattBankKnown(bank)) {
+    return false;
+  }
+  const uint8_t soc = (bank == 2) ? dualBattSocB : dualBattSocA;
+  return soc >= chargeTargetSoc;
+}
+
+static bool dualBattCooldownActive() {
+  return dualBattLastSwitchMs != 0 &&
+         (millis() - dualBattLastSwitchMs) < uint32_t(DUAL_BATT_COOLDOWN_MS);
+}
+
 static void dualBattMarkActiveEmpty() {
   if (dualBattActive == 2) {
     dualBattStickyEmptyB = true;
@@ -895,7 +914,7 @@ static bool dualBattTrySwapOther(bool forEmpty) {
     if (dualBattBankKnown(other) && dualBattBankEmpty(other)) {
       return false;
     }
-  } else if (dualBattBankKnown(other) && dualBattBankFull(other)) {
+  } else if (dualBattBankKnown(other) && dualBattBankChargeDone(other)) {
     return false;
   }
   return dualBattRequestBank(other);
@@ -929,8 +948,10 @@ static void dualBattEvaluatePolicy() {
 
   const bool aEmpty = dualBattBankEmpty(1);
   const bool bEmpty = dualBattBankEmpty(2);
-  const bool aFull = dualBattBankFull(1);
-  const bool bFull = dualBattBankFull(2);
+  // Charge handover: a bank at the manual charge target counts as done, so
+  // charging moves to the other bank instead of stopping at the target.
+  const bool aFull = dualBattBankChargeDone(1);
+  const bool bFull = dualBattBankChargeDone(2);
   if (wantDischarge) {
     if (dualBattActive == 1) {
       if (aEmpty && !bEmpty) {
@@ -1066,7 +1087,9 @@ static void dualBattTick() {
 }
 #endif // DUAL_BATT_ENABLE
 
-// Manual charge (ESS off): stop at chargeTargetSoc and go standby.
+// Manual charge (ESS off): stop at chargeTargetSoc and go standby. The target is
+// a pack-wide (combined) SOC: when the active bank reaches it while the combined
+// SOC is still short, hand over to the other bank first.
 static void checkChargeTargetSoc() {
   if (essEnabled || chargeTargetSoc == 0) {
     return;
@@ -1077,14 +1100,47 @@ static void checkChargeTargetSoc() {
   if (!lastSofar.socValid) {
     return;
   }
-  float effectiveSoc = float(lastSofar.batterySoc);
+  const float target = float(chargeTargetSoc);
+  const float activeSoc = float(lastSofar.batterySoc);
+  float effectiveSoc = activeSoc;
+  bool stopAtTarget = false;
 #if DUAL_BATT_ENABLE
+  // A bank switch owns the Sofar state; never standby mid-switch.
+  if (dualBattBusy()) {
+    return;
+  }
   const float combinedSoc = dualBattCombinedSoc();
   if (!isnan(combinedSoc)) {
     effectiveSoc = combinedSoc;
   }
+  // Unknown combined (other bank not seen yet) counts as short: the other bank
+  // may still take charge.
+  const bool combinedShort = isnan(combinedSoc) || combinedSoc < target;
+  if (dualBattEnabled && combinedShort) {
+    // Active bank reached the target (or is physically full) but the pack is
+    // still short: hand over to the other bank and keep charging.
+    const bool activeAtLimit =
+        activeSoc >= target || activeSoc >= float(dualBattFullSoc);
+    if (activeAtLimit && dualBattForce == 0) {
+      if (dualBattTrySwapOther(false)) {
+        Log.printf("[charge] target SOC %u — bank %s at limit, switching to %s\n",
+                   chargeTargetSoc,
+                   dualBattLabel(dualBattActive),
+                   dualBattLabel(dualBattTarget));
+        return;
+      }
+      if (dualBattCooldownActive()) {
+        return; // retry on next poll once the switch cooldown passes
+      }
+    }
+    if (activeSoc < float(dualBattFullSoc)) {
+      return; // keep charging the active bank
+    }
+    // Physically full and no other bank can take charge: stop below.
+    stopAtTarget = true;
+  }
 #endif
-  if (effectiveSoc < float(chargeTargetSoc)) {
+  if (!stopAtTarget && effectiveSoc < target) {
     return;
   }
 

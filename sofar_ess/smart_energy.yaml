@@ -11,9 +11,11 @@
 #   6. Enable Automation when the Decision / Target look sensible
 #
 # Cheap window: 00:30–05:30 @ 9.5p/kWh; rest of day full ESS (33.42p).
-# In-window: SOC < target → force charge (no ESS); SOC > target → full ESS until SOC ≤ target
-# then standby (no ESS). Control uses connected inverter SOC (not combined) to avoid dual-bank steps.
-# Charge uses sofaress/set/charge + set/charge_target_soc; firmware stops at target → standby.
+# In-window decisions use combined SOC (both banks, capacity-weighted); connected SOC is only a fallback.
+# In-window: SOC < target → force charge (no ESS); SOC > target + margin → full ESS until trimmed back;
+# otherwise standby (no ESS). Charge uses sofaress/set/charge + set/charge_target_soc. The target is
+# pack-wide: when bank A reaches it while combined is short, firmware hands over to bank B and keeps
+# charging; it only stops at standby when combined SOC reaches the target.
 # After midnight the day-ahead solar sensor is energy_production_today
 # (energy_production_tomorrow is the following day — used for evening preview).
 #
@@ -46,25 +48,27 @@ input_boolean:
   smart_charge_session_active:
     name: Smart charge session active
     icon: mdi:timer-sand
+  smart_charge_defaults_seeded:
+    name: Smart charge defaults seeded
+    icon: mdi:database-check
+    # Off until the first start seeds defaults; restored (never reset) afterwards.
 
 input_number:
   smart_charge_min_soc:
     name: Smart charge min SOC
-    min: 5
-    max: 90
+    min: 0
+    max: 100
     step: 1
     unit_of_measurement: "%"
     icon: mdi:battery-20
-    initial: 60
     mode: box
   smart_charge_max_soc:
     name: Smart charge max overnight SOC
-    min: 5
+    min: 0
     max: 100
     step: 1
     unit_of_measurement: "%"
     icon: mdi:battery-80
-    initial: 90
     mode: box
   smart_charge_battery_kwh:
     name: Smart charge battery capacity
@@ -73,7 +77,6 @@ input_number:
     step: 0.1
     unit_of_measurement: kWh
     icon: mdi:battery
-    initial: 15
     mode: box
   smart_charge_power_w:
     name: Smart charge power
@@ -82,7 +85,6 @@ input_number:
     step: 50
     unit_of_measurement: W
     icon: mdi:flash
-    initial: 2500
     mode: box
   smart_charge_learned_demand_kwh:
     name: Smart charge daily demand
@@ -91,7 +93,6 @@ input_number:
     step: 0.1
     unit_of_measurement: kWh
     icon: mdi:home-lightning-bolt
-    initial: 12
     mode: box
   smart_charge_forecast_correction:
     name: Smart charge forecast correction
@@ -99,7 +100,6 @@ input_number:
     max: 1.5
     step: 0.01
     icon: mdi:chart-line
-    initial: 1.0
     mode: box
   smart_charge_locked_target_soc:
     name: Smart charge locked overnight target
@@ -108,7 +108,6 @@ input_number:
     step: 1
     unit_of_measurement: "%"
     icon: mdi:target
-    initial: 20
     mode: box
   smart_charge_soc_margin:
     name: Smart charge SOC margin
@@ -117,7 +116,6 @@ input_number:
     step: 0.5
     unit_of_measurement: "%"
     icon: mdi:minus-plus
-    initial: 1
     mode: box
   smart_charge_saved_day_forecast:
     name: Smart charge saved day forecast
@@ -126,7 +124,6 @@ input_number:
     step: 0.01
     unit_of_measurement: kWh
     icon: mdi:weather-sunny
-    initial: 0
     mode: box
 
 input_text:
@@ -209,7 +206,8 @@ template:
             {{ 'combined' if combined not in ['unknown', 'unavailable', 'none', '']
                else 'connected_fallback' }}
 
-      # Inverter SOC on the active bank — use for cheap-window charge/ESS decisions (not combined).
+      # Inverter SOC on the active bank — informational only. Cheap-window decisions use
+      # Smart Charge Battery SOC (combined).
       - name: Smart Charge Control SOC
         unique_id: smart_charge_control_soc
         unit_of_measurement: "%"
@@ -308,10 +306,10 @@ template:
         state: >-
           {% set ent = states('sensor.smart_charge_forecast_entity') %}
           {% set raw = states(ent) %}
-          {% set min_soc = states('input_number.smart_charge_min_soc') | float(20) %}
-          {% set max_soc = states('input_number.smart_charge_max_soc') | float(80) %}
+          {% set min_soc = states('input_number.smart_charge_min_soc') | float(60) %}
+          {% set max_soc = states('input_number.smart_charge_max_soc') | float(90) %}
           {% set demand = states('input_number.smart_charge_learned_demand_kwh') | float(12) %}
-          {% set cap = states('input_number.smart_charge_battery_kwh') | float(10) %}
+          {% set cap = states('input_number.smart_charge_battery_kwh') | float(15) %}
           {% set corr = states('input_number.smart_charge_forecast_correction') | float(1) %}
           {% if raw in ['unknown', 'unavailable', 'none', ''] or cap <= 0 %}
             {{ max_soc | int }}
@@ -421,12 +419,12 @@ script:
     icon: mdi:calculator-variant
     sequence:
       - variables:
-          soc_raw: "{{ states('sensor.smart_charge_control_soc') }}"
+          soc_raw: "{{ states('sensor.smart_charge_battery_soc') }}"
           forecast_ent: "{{ states('sensor.smart_charge_forecast_entity') }}"
           forecast_raw: "{{ states(states('sensor.smart_charge_forecast_entity')) }}"
           target_live: "{{ states('sensor.smart_charge_target_soc') | int(80) }}"
-          min_soc: "{{ states('input_number.smart_charge_min_soc') | float(20) }}"
-          max_soc: "{{ states('input_number.smart_charge_max_soc') | float(80) }}"
+          min_soc: "{{ states('input_number.smart_charge_min_soc') | float(60) }}"
+          max_soc: "{{ states('input_number.smart_charge_max_soc') | float(90) }}"
           demand: "{{ states('input_number.smart_charge_learned_demand_kwh') | float(12) }}"
           corr: "{{ states('input_number.smart_charge_forecast_correction') | float(1) }}"
           fallback: "{{ states(states('sensor.smart_charge_forecast_entity')) in ['unknown', 'unavailable', 'none', ''] }}"
@@ -477,7 +475,8 @@ script:
                         after: "00:30:00"
                         before: "05:30:00"
                 sequence:
-                  # SOC < target − margin → charge (no ESS)
+                  # Combined SOC unknown (other bank not seen yet) → charge; firmware hands over.
+                  # SOC < target → charge (no ESS). Standby never fires while combined is short.
                   # SOC > target + margin → ESS until trimmed back to target
                   # else → standby at target (no ESS, no charge)
                   - variables:
@@ -486,7 +485,9 @@ script:
                         {% set t = target | float %}
                         {% set s = soc | float %}
                         {% set m = states('input_number.smart_charge_soc_margin') | float(1) %}
-                        {% if s < (t - m) %}
+                        {% if states('sensor.sofar_ess_battery_combined_soc') in ['unknown', 'unavailable', 'none', ''] %}
+                          charge
+                        {% elif s < t %}
                           charge
                         {% elif s > (t + m) %}
                           ess
@@ -503,7 +504,7 @@ script:
                             data:
                               status: charging
                               reason: >-
-                                {{ reason }} | SOC {{ soc | round(1) }}% < {{ target }}% − {{ margin }}% — charging (no ESS)
+                                {{ reason }} | SOC {{ soc | round(1) }}% < {{ target }}% — charging (no ESS)
                       - conditions:
                           - condition: template
                             value_template: "{{ band == 'ess' }}"
@@ -529,6 +530,69 @@ script:
                   reason: "Outside cheap window — full ESS active"
 
 automation:
+  - id: smart_charge_seed_defaults
+    alias: Smart charge seed defaults once
+    description: >-
+      First start only: give never-saved overnight settings their defaults. Afterwards Home
+      Assistant restores the saved values, so user changes survive restarts.
+    mode: single
+    trigger:
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: input_boolean.smart_charge_defaults_seeded
+        state: "off"
+    action:
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_min_soc
+        data:
+          value: 60
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_max_soc
+        data:
+          value: 90
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_battery_kwh
+        data:
+          value: 15
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_power_w
+        data:
+          value: 2500
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_learned_demand_kwh
+        data:
+          value: 12
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_forecast_correction
+        data:
+          value: 1.0
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_locked_target_soc
+        data:
+          value: 20
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_soc_margin
+        data:
+          value: 1
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.smart_charge_saved_day_forecast
+        data:
+          value: 0
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.smart_charge_defaults_seeded
+
   - id: smart_charge_cheap_window_start
     alias: Smart charge cheap window start
     description: At 00:30 lock target from day-ahead forecast and charge or hold.
@@ -553,16 +617,19 @@ automation:
   - id: smart_charge_hold_at_target
     alias: Smart charge stop at target → standby
     description: >-
-      When force-charging reaches the locked target during the cheap window, go standby (no ESS).
+      When force-charging reaches the locked target on combined SOC during the cheap window, go standby (no ESS).
+      Connected-only SOC never triggers standby, so a bank handover is not stopped early.
     mode: single
     trigger:
       - platform: numeric_state
-        entity_id: sensor.smart_charge_control_soc
+        entity_id: sensor.smart_charge_battery_soc
         above: input_number.smart_charge_locked_target_soc
     condition:
       - condition: state
         entity_id: input_boolean.smart_charge_enabled
         state: "on"
+      - condition: template
+        value_template: "{{ states('sensor.sofar_ess_battery_combined_soc') not in ['unknown', 'unavailable', 'none', ''] }}"
       - condition: time
         after: "00:30:00"
         before: "05:30:00"
@@ -585,7 +652,7 @@ automation:
     mode: single
     trigger:
       - platform: numeric_state
-        entity_id: sensor.smart_charge_control_soc
+        entity_id: sensor.smart_charge_battery_soc
         above: input_number.smart_charge_locked_target_soc
     condition:
       - condition: state
@@ -596,7 +663,7 @@ automation:
         before: "05:30:00"
       - condition: template
         value_template: >-
-          {% set soc = states('sensor.smart_charge_control_soc') | float(0) %}
+          {% set soc = states('sensor.smart_charge_battery_soc') | float(0) %}
           {% set target = states('input_number.smart_charge_locked_target_soc') | float(0) %}
           {% set m = states('input_number.smart_charge_soc_margin') | float(1) %}
           {{ soc > (target + m) }}
@@ -614,7 +681,7 @@ automation:
     trigger:
       - platform: state
         entity_id:
-          - sensor.smart_charge_control_soc
+          - sensor.smart_charge_battery_soc
           - input_number.smart_charge_locked_target_soc
           - input_number.smart_charge_soc_margin
     condition:
@@ -628,7 +695,7 @@ automation:
         value_template: "{{ states('input_text.smart_charge_status') == 'ess' }}"
       - condition: template
         value_template: >-
-          {% set soc = states('sensor.smart_charge_control_soc') | float(0) %}
+          {% set soc = states('sensor.smart_charge_battery_soc') | float(0) %}
           {% set target = states('input_number.smart_charge_locked_target_soc') | float(0) %}
           {% set m = states('input_number.smart_charge_soc_margin') | float(1) %}
           {{ soc <= (target + m) }}
@@ -638,7 +705,7 @@ automation:
         data:
           status: holding
           reason: >-
-            ESS trimmed SOC to {{ states('sensor.smart_charge_control_soc') }}%
+            ESS trimmed SOC to {{ states('sensor.smart_charge_battery_soc') }}%
             (target {{ states('input_number.smart_charge_locked_target_soc') | int }}%) — standby (no ESS)
 
   - id: smart_charge_resume_if_soc_drops
@@ -648,7 +715,7 @@ automation:
     mode: single
     trigger:
       - platform: numeric_state
-        entity_id: sensor.smart_charge_control_soc
+        entity_id: sensor.smart_charge_battery_soc
         below: input_number.smart_charge_locked_target_soc
         for:
           minutes: 2
@@ -664,7 +731,7 @@ automation:
           {{ states('input_text.smart_charge_status') in ['ess', 'holding', 'idle'] }}
       - condition: template
         value_template: >-
-          {% set soc = states('sensor.smart_charge_control_soc') | float(0) %}
+          {% set soc = states('sensor.smart_charge_battery_soc') | float(0) %}
           {% set target = states('input_number.smart_charge_locked_target_soc') | float(0) %}
           {% set m = states('input_number.smart_charge_soc_margin') | float(1) %}
           {{ soc < (target - m) }}
