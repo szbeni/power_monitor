@@ -73,6 +73,7 @@ static uint8_t battParamProbeIdx = 0;
 static uint32_t lastCmdMs = 0;
 static int16_t lastCmdW = 0; // +discharge, -charge, 0=standby
 static uint32_t essChargeBlockedFullMs = 0; // last charge suppressed by full protect
+static uint32_t essDischargeBlockedLowMs = 0; // last discharge suppressed by low protect
 static uint8_t chargeTargetSoc = 0; // 0 = no limit; manual charge stops at target → standby
 
 enum class FollowRecoverState : uint8_t { Idle = 0, Standby, Hold };
@@ -117,6 +118,7 @@ static bool dualBattSocAValid = false;
 static bool dualBattSocBValid = false;
 static uint32_t dualBattStateMs = 0;
 static uint32_t dualBattLastSwitchMs = 0;
+static uint8_t dualBattAutoDwellMin = DUAL_BATT_AUTO_DWELL_MIN; // Auto-only switch dwell (min)
 static bool dualBattSelectedMatch = false;
 static uint8_t dualBattReportedSelected = 0; // from selector MQTT, 0=unknown
 static int16_t dualBattResumeCmdW = 0;
@@ -219,6 +221,7 @@ static void loadSettingsFromNvs() {
 #if DUAL_BATT_ENABLE
   dualBattEmptySoc = nvsPrefs.getUChar("db_empty", dualBattEmptySoc);
   dualBattFullSoc = nvsPrefs.getUChar("db_full", dualBattFullSoc);
+  dualBattAutoDwellMin = nvsPrefs.getUChar("db_dwell", dualBattAutoDwellMin);
   dualBattForce = nvsPrefs.getUChar("db_force", dualBattForce);
   dualBattEnabled = nvsPrefs.getBool("db_en", dualBattEnabled);
   if (essSocProtectEnabled && dualBattEmptySoc > essSocProtectLow) {
@@ -545,6 +548,7 @@ static void updateEssSocProtect() {
     mqttPublish("ess/effective_charge_only", "true", true);
   } else if (essSocProtectActive && soc >= resumeLowAt) {
     essSocProtectActive = false;
+    essDischargeBlockedLowMs = 0;
     Log.printf("[ess] SOC %u >= %u — bidirectional (low) resumed\n", soc, resumeLowAt);
     publishSocProtectParams();
     mqttPublish("ess/effective_charge_only", essEffectiveChargeOnly() ? "true" : "false", true);
@@ -684,6 +688,7 @@ static void publishDualBatt() {
   mqttPublish("battery/force", dualBattForceLabel(), true);
   mqttPublish("battery/empty", String(dualBattEmptySoc), true);
   mqttPublish("battery/full", String(dualBattFullSoc), true);
+  mqttPublish("battery/auto_dwell_min", String(dualBattAutoDwellMin), true);
   mqttPublish("battery/dual_enabled", dualBattEnabled ? "true" : "false", true);
   if (dualBattSocAValid) {
     mqttPublish("battery/a/soc", String(dualBattSocA), true);
@@ -801,7 +806,9 @@ static void dualBattBeginSwitch(uint8_t bank) {
   dualBattSetState(DualBattState::Standby);
 }
 
-static bool dualBattRequestBank(uint8_t bank) {
+// urgent = protection or safety handover (BMS refuse, active bank empty,
+// overnight target). Auto-only dwell does not apply to urgent requests.
+static bool dualBattRequestBank(uint8_t bank, bool urgent = false) {
   if (!dualBattEnabled && dualBattForce == 0) {
     return false;
   }
@@ -812,6 +819,13 @@ static bool dualBattRequestBank(uint8_t bank) {
   if (dualBattLastSwitchMs != 0 && (now - dualBattLastSwitchMs) < DUAL_BATT_COOLDOWN_MS) {
     Log.printf("[dual] cooldown %lu ms left\n",
                static_cast<unsigned long>(DUAL_BATT_COOLDOWN_MS - (now - dualBattLastSwitchMs)));
+    return false;
+  }
+  const uint32_t dwellMs = uint32_t(dualBattAutoDwellMin) * 60000UL;
+  if (!urgent && dualBattForce == 0 && dwellMs != 0 && dualBattLastSwitchMs != 0 &&
+      (now - dualBattLastSwitchMs) < dwellMs) {
+    Log.printf("[dual] auto dwell %lu s left\n",
+               static_cast<unsigned long>((dwellMs - (now - dualBattLastSwitchMs)) / 1000UL));
     return false;
   }
   dualBattBeginSwitch(bank);
@@ -905,7 +919,7 @@ static bool dualBattActiveStickyFull() {
   return dualBattActive == 2 ? dualBattStickyFullB : dualBattStickyFullA;
 }
 
-static bool dualBattTrySwapOther(bool forEmpty) {
+static bool dualBattTrySwapOther(bool forEmpty, bool urgent = false) {
   if (!dualBattEnabled || dualBattForce != 0 || dualBattBusy()) {
     return false;
   }
@@ -917,7 +931,7 @@ static bool dualBattTrySwapOther(bool forEmpty) {
   } else if (dualBattBankKnown(other) && dualBattBankChargeDone(other)) {
     return false;
   }
-  return dualBattRequestBank(other);
+  return dualBattRequestBank(other, urgent);
 }
 
 static void dualBattEvaluatePolicy() {
@@ -928,7 +942,7 @@ static void dualBattEvaluatePolicy() {
   // Force override: keep requested bank connected.
   if (dualBattForce == 1 || dualBattForce == 2) {
     if (dualBattForce != dualBattActive) {
-      dualBattRequestBank(dualBattForce);
+      dualBattRequestBank(dualBattForce, true); // forced: no Auto dwell
     }
     return;
   }
@@ -940,8 +954,14 @@ static void dualBattEvaluatePolicy() {
   const bool chargeBlockedFull =
       essChargeBlockedFullMs != 0 &&
       (millis() - essChargeBlockedFullMs) < uint32_t(DUAL_BATT_FULL_HANDOVER_MS);
-  const bool wantDischarge = lastCmdW > int16_t(essHoldMinW);
-  const bool wantCharge = lastCmdW < -int16_t(essHoldMinW) || (chargeBlockedFull && !wantDischarge);
+  const bool dischargeBlockedLow =
+      essDischargeBlockedLowMs != 0 &&
+      (millis() - essDischargeBlockedLowMs) < uint32_t(DUAL_BATT_FULL_HANDOVER_MS);
+  const bool wantDischargeCmd = lastCmdW > int16_t(essHoldMinW);
+  const bool wantCharge = lastCmdW < -int16_t(essHoldMinW) || (chargeBlockedFull && !wantDischargeCmd);
+  // Low protect turns the discharge into a -hold charge, so it can look like
+  // charge intent. Count the suppressed discharge as discharge intent.
+  const bool wantDischarge = wantDischargeCmd || (dischargeBlockedLow && !wantCharge);
   if (!wantDischarge && !wantCharge) {
     return;
   }
@@ -952,14 +972,16 @@ static void dualBattEvaluatePolicy() {
   // charging moves to the other bank instead of stopping at the target.
   const bool aFull = dualBattBankChargeDone(1);
   const bool bFull = dualBattBankChargeDone(2);
+  // Leaving an empty bank is urgent (bypasses the Auto dwell). Prefer-A on
+  // discharge and charge is unchanged.
   if (wantDischarge) {
     if (dualBattActive == 1) {
       if (aEmpty && !bEmpty) {
-        dualBattRequestBank(2);
+        dualBattRequestBank(2, true);
       }
     } else {
       if (!aEmpty) {
-        dualBattRequestBank(1);
+        dualBattRequestBank(1, bEmpty);
       }
     }
   } else if (wantCharge) {
@@ -1122,7 +1144,7 @@ static void checkChargeTargetSoc() {
     const bool activeAtLimit =
         activeSoc >= target || activeSoc >= float(dualBattFullSoc);
     if (activeAtLimit && dualBattForce == 0) {
-      if (dualBattTrySwapOther(false)) {
+      if (dualBattTrySwapOther(false, true)) { // overnight target handover: urgent
         Log.printf("[charge] target SOC %u — bank %s at limit, switching to %s\n",
                    chargeTargetSoc,
                    dualBattLabel(dualBattActive),
@@ -1529,6 +1551,7 @@ static void publishHaDiscovery() {
 #if DUAL_BATT_ENABLE
       {"dual_batt_empty", "Battery Empty SOC", "battery/empty", "set/dual_batt_empty", 0.0f, 100.0f, 1.0f},
       {"dual_batt_full", "Battery Full SOC", "battery/full", "set/dual_batt_full", 0.0f, 100.0f, 1.0f},
+      {"dual_batt_dwell", "Battery Auto Dwell", "battery/auto_dwell_min", "set/dual_batt_dwell", 0.0f, 240.0f, 1.0f},
 #endif
   };
   for (const auto& n : numbers) {
@@ -1838,7 +1861,7 @@ static void followHandleLimit(bool empty) {
     followLastRecovery = FollowRecovery::SwapFull;
   }
   mqttPublish("ess/follow_recovery", followRecoveryName(followLastRecovery));
-  if (dualBattTrySwapOther(empty)) {
+  if (dualBattTrySwapOther(empty, true)) { // BMS refuse: urgent
     Log.printf("[follow] swap for BMS %s\n", empty ? "empty" : "full");
     return;
   }
@@ -1923,7 +1946,7 @@ static void followTick() {
     if (!dualBattActiveStickyFull()) {
       followHandleLimit(false);
     } else {
-      dualBattTrySwapOther(false); // already marked full — keep retrying handover
+      dualBattTrySwapOther(false, true); // already marked full — keep retrying handover (urgent)
     }
 #else
     followHandleLimit(false);
@@ -1938,7 +1961,7 @@ static void followTick() {
     if (!dualBattActiveStickyEmpty()) {
       followHandleLimit(true);
     } else {
-      dualBattTrySwapOther(true); // already marked empty — keep retrying handover
+      dualBattTrySwapOther(true, true); // already marked empty — keep retrying handover (urgent)
     }
 #else
     followHandleLimit(true);
@@ -2062,6 +2085,12 @@ static void applyEss(float gridPowerW) {
     // Export the pack could soak if it were not full — dual-battery handover
     // reads this as charge intent.
     essChargeBlockedFullMs = nowPi;
+  }
+  // Low-SOC protect cancelled a real discharge: the bank policy reads this as
+  // discharge intent so an empty connected bank can hand over. User charge-only
+  // is a mode choice, not a bank fault, so it does not count.
+  if (essSocProtectActive && !essChargeOnlyUser && u > essDeadbandW && uMax <= 0.0f) {
+    essDischargeBlockedLowMs = nowPi;
   }
   if (u > uMax) {
     u = uMax;
@@ -2478,6 +2507,19 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       publishDualBatt();
     } else {
       Log.println("[dual] full out of range (0..100)");
+    }
+    return;
+  }
+
+  if (cmd == "dual_batt_dwell" || cmd == "auto_dwell_min") {
+    const int v = msg.toInt();
+    if (v >= 0 && v <= 240) {
+      dualBattAutoDwellMin = uint8_t(v);
+      Log.printf("[dual] auto_dwell=%u min\n", dualBattAutoDwellMin);
+      nvsPutU8("db_dwell", dualBattAutoDwellMin);
+      publishDualBatt();
+    } else {
+      Log.println("[dual] auto dwell out of range (0..240 min)");
     }
     return;
   }

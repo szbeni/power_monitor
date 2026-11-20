@@ -194,6 +194,11 @@
 #ifndef DUAL_BATT_COOLDOWN_MS
 #define DUAL_BATT_COOLDOWN_MS 60000
 #endif
+// Minimum minutes between Auto-initiated bank switches (sun in/out bounce guard).
+// Forced, BMS-refused, active-empty and overnight-target handovers bypass it. 0 = off.
+#ifndef DUAL_BATT_AUTO_DWELL_MIN
+#define DUAL_BATT_AUTO_DWELL_MIN 15
+#endif
 #ifndef DUAL_BATT_CONFIRM_TIMEOUT_MS
 #define DUAL_BATT_CONFIRM_TIMEOUT_MS 10000
 #endif

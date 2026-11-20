@@ -26,7 +26,7 @@ Defaults: `Kp=0.4`, `Ki=0.3` (per second), tunable live over MQTT. Integrator fr
 
 **Settings persistence:** ESS tuning (`kp`, `soc_protect_*`, etc.) and dual-battery thresholds are saved to ESP32 NVS on change and restored on boot.
 
-**Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). With a manual charge target set, a bank that reaches the target counts as done for handover, so charging moves to the other bank until combined SOC reaches the target (no bounce back to a bank already at target). A pack also counts as full once high-SOC protect latches on it, or once it stops accepting more than `FOLLOW_TAPER_MIN_W` (150 W) of a much larger charge command — tapering to a lower power near the top is normal charging and does not hand over. Force a bank via `set/battery`. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle (`DUAL_BATT_SETTLE_MS`, 15 s) → invalidate SOC → re-poll until confirmed.
+**Dual battery** (with [`battery_selector`](../battery_selector/)): prefers bank **A** (10 kWh GTX5000 parallel) over **B** (5 kWh Fogstar). Tracks last-known SOC per bank; auto-switches when A is empty (discharge) or full (charge). With a manual charge target set, a bank that reaches the target counts as done for handover, so charging moves to the other bank until combined SOC reaches the target (no bounce back to a bank already at target). A pack also counts as full once high-SOC protect latches on it, or once it stops accepting more than `FOLLOW_TAPER_MIN_W` (150 W) of a much larger charge command — tapering to a lower power near the top is normal charging and does not hand over. Force a bank via `set/battery`. Auto switches are rate-limited by a minimum dwell (`set/dual_batt_dwell`, default 15 min) to stop A/B bouncing on sun in/out; forced and protection handovers bypass it. When low-SOC protect cancels a real discharge on an empty bank, the discharge counts as intent so the other bank can take over. Empty/full defaults **10% / 98%**, MQTT/HA tunable. Bank changes: standby → MQTT select → settle (`DUAL_BATT_SETTLE_MS`, 15 s) → invalidate SOC → re-poll until confirmed.
 
 **SOC validation** (why a bank switch no longer reports a bogus SOC): a mis-paired Modbus reply is indistinguishable from a real register value, so SOC is filtered three ways.
 
@@ -165,6 +165,7 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/battery/force_select` | pub | HA select state: `Auto` / `Battery A` / `Battery B` (retained) |
 | `…/battery/empty` | pub | Empty SOC threshold % (retained) |
 | `…/battery/full` | pub | Full SOC threshold % (retained) |
+| `…/battery/auto_dwell_min` | pub | Minimum minutes between Auto bank switches (retained, 0 = off) |
 | `…/battery/dual_enabled` | pub | Auto dual-battery policy on/off (retained) |
 | `…/set/ess` | sub | `true` / `false` — enable/disable; `charge_only` = enable + soak-only; `full` = enable + bidirectional |
 | `…/set/charge_only` | sub | `true` / `false` — user charge-only preference (cmd ≤ 0) |
@@ -181,6 +182,7 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/set/dual_batt` | sub | `true` / `false` — enable A-prefer auto bank switching |
 | `…/set/dual_batt_empty` | sub | int 0…100 — empty threshold % (default 10) |
 | `…/set/dual_batt_full` | sub | int 0…100 — full threshold % (default 98) |
+| `…/set/dual_batt_dwell` | sub | int 0…240 — minimum minutes between Auto bank switches (default 15, 0 = off). Forced, BMS-refused, active-empty and overnight-target handovers bypass it |
 | `…/set/battery` | sub | `Auto` / `Battery A` / `Battery B` / `A` / `B` — force bank or clear force |
 | `…/set/reset_i` | sub | any — clear PI integrator |
 | `…/set/standby` | sub | `true` — force standby (battery idle). **Disables ESS** |
