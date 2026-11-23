@@ -264,6 +264,17 @@
 #ifndef FOLLOW_GRACE_MS
 #define FOLLOW_GRACE_MS 30000
 #endif
+// Manual charge is a max charge power ceiling: the actual power may be lower
+// (BMS limit, taper) without that being a fault. The session re-sends the command
+// this often (also refreshes the inverter passive status bits) and after any
+// unplanned standby.
+#ifndef MANUAL_CHARGE_REFRESH_MS
+#define MANUAL_CHARGE_REFRESH_MS 15000
+#endif
+// Default stored max charge power (W) for the Charge button / set/charge true.
+#ifndef MANUAL_CHARGE_DEFAULT_W
+#define MANUAL_CHARGE_DEFAULT_W 2500
+#endif
 #ifndef FOLLOW_ACTUAL_STALE_MS
 #define FOLLOW_ACTUAL_STALE_MS 15000
 #endif

@@ -565,7 +565,9 @@ views:
           - entity: input_number.smart_charge_battery_kwh
             name: Battery capacity
           - entity: input_number.smart_charge_power_w
-            name: Charge power
+            name: Max charge power (smart charge)
+          - entity: number.sofar_ess_max_charge_power
+            name: Max charge power (manual Charge button)
           - entity: number.sofar_ess_charge_target_soc
             name: Charge target SOC (firmware)
           - type: divider
@@ -650,6 +652,8 @@ views:
           - entity: number.sofar_ess_ess_hold_min
             name: Near-zero hold (W)
           - type: divider
+          - entity: button.sofar_ess_charge
+            name: Charge (max power)
           - entity: button.sofar_ess_standby
             name: Standby
           - entity: button.sofar_ess_auto

@@ -13,7 +13,8 @@
 # Cheap window: 00:30–05:30 @ 9.5p/kWh; rest of day full ESS (33.42p).
 # In-window decisions use combined SOC (both banks, capacity-weighted); connected SOC is only a fallback.
 # In-window: SOC < target → force charge (no ESS); SOC > target + margin → full ESS until trimmed back;
-# otherwise standby (no ESS). Charge uses sofaress/set/charge + set/charge_target_soc. The target is
+# otherwise standby (no ESS). Charge uses sofaress/set/charge (max power ceiling; actual power may be
+# lower) + set/charge_target_soc. The target is
 # pack-wide: when bank A reaches it while combined is short, firmware hands over to bank B and keeps
 # charging; it only stops at standby when combined SOC reaches the target.
 # After midnight the day-ahead solar sensor is energy_production_today
@@ -78,8 +79,10 @@ input_number:
     unit_of_measurement: kWh
     icon: mdi:battery
     mode: box
+  # Max charge power (ceiling) sent with set/charge. The pack may charge slower
+  # (BMS limit, taper near full); the firmware does not stop or swap banks for that.
   smart_charge_power_w:
-    name: Smart charge power
+    name: Smart max charge power
     min: 200
     max: 3600
     step: 50
@@ -366,6 +369,8 @@ script:
         data:
           topic: sofaress/set/charge_target_soc
           payload: "{{ states('input_number.smart_charge_locked_target_soc') | int }}"
+      # Payload is the max charge power (W): a ceiling, not a target. Firmware keeps
+      # this charge session alive until the target SOC, standby/auto/ESS command.
       - service: mqtt.publish
         data:
           topic: sofaress/set/charge

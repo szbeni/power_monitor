@@ -75,6 +75,13 @@ static int16_t lastCmdW = 0; // +discharge, -charge, 0=standby
 static uint32_t essChargeBlockedFullMs = 0; // last charge suppressed by full protect
 static uint32_t essDischargeBlockedLowMs = 0; // last discharge suppressed by low protect
 static uint8_t chargeTargetSoc = 0; // 0 = no limit; manual charge stops at target → standby
+// Manual charge session. The command is a max charge power: actual power below it
+// (BMS limit, taper) is normal and never a fault. 0 = no session.
+static uint16_t maxChargeW = MANUAL_CHARGE_DEFAULT_W; // stored max, used by "charge true"
+static uint16_t manualChargeW = 0;
+static uint32_t manualChargeSentMs = 0;
+static uint32_t manualChargeTryMs = 0;
+static uint32_t followProhibitSinceMs = 0; // BMS charge-prohibit debounce (manual session)
 
 enum class FollowRecoverState : uint8_t { Idle = 0, Standby, Hold };
 enum class FollowRecovery : uint8_t { None = 0, SwapEmpty, SwapFull, StandbyReset };
@@ -164,6 +171,7 @@ static const char* followRecoveryName(FollowRecovery r) {
 static void beginFollowGrace() {
   followGraceUntilMs = millis() + uint32_t(FOLLOW_GRACE_MS);
   followFailSinceMs = 0;
+  followProhibitSinceMs = 0;
   followGraceActive = true;
   followOk = true;
   followErrorW = 0;
@@ -218,6 +226,12 @@ static void loadSettingsFromNvs() {
   essMinDeltaW = nvsPrefs.getFloat("min_delta", essMinDeltaW);
   essHoldMinW = uint16_t(nvsPrefs.getUInt("hold_min", essHoldMinW));
   chargeTargetSoc = nvsPrefs.getUChar("chg_tgt", chargeTargetSoc);
+  maxChargeW = uint16_t(nvsPrefs.getUInt("chg_max_w", maxChargeW));
+  if (maxChargeW > MAX_POWER_W) {
+    maxChargeW = MAX_POWER_W;
+  } else if (maxChargeW < 200) {
+    maxChargeW = 200;
+  }
 #if DUAL_BATT_ENABLE
   dualBattEmptySoc = nvsPrefs.getUChar("db_empty", dualBattEmptySoc);
   dualBattFullSoc = nvsPrefs.getUChar("db_full", dualBattFullSoc);
@@ -623,6 +637,20 @@ static Load2Snapshot captureLoad2() {
 
 static void publishChargeTargetSoc() {
   mqttPublish("charge/target_soc", String(chargeTargetSoc), true);
+}
+
+static void publishManualCharge() {
+  mqttPublish("charge/max_w", String(maxChargeW), true);
+  mqttPublish("charge/manual_w", String(manualChargeW), true);
+}
+
+// Ends the manual charge session so manualChargeTick() stops re-asserting it.
+static void endManualCharge() {
+  if (manualChargeW != 0) {
+    manualChargeW = 0;
+    followProhibitSinceMs = 0;
+    publishManualCharge();
+  }
 }
 
 #if DUAL_BATT_ENABLE
@@ -1173,6 +1201,7 @@ static void checkChargeTargetSoc() {
     beginFollowGrace();
     chargeTargetSoc = 0;
     publishChargeTargetSoc();
+    endManualCharge(); // target reached: stop re-asserting the charge
     Log.printf("[charge] target SOC %u reached (effective %.1f%%) — standby\n",
                hit,
                effectiveSoc);
@@ -1538,6 +1567,9 @@ static void publishHaDiscovery() {
       {"deadband", "ESS Deadband", "ess/deadband", "set/deadband", 0.0f, 500.0f, 5.0f},
       {"min_delta", "ESS Min Delta", "ess/min_delta", "set/min_delta", 0.0f, 500.0f, 5.0f},
       {"hold_min", "ESS Hold Min", "ess/hold_min", "set/hold_min", 1.0f, float(MAX_POWER_W), 5.0f},
+      // Max charge power for manual charge (Charge button / set/charge true). The
+      // pack may take less (BMS limit, taper); this is a ceiling, not a target.
+      {"max_charge_w", "Max Charge Power", "charge/max_w", "set/max_charge_w", 200.0f, float(MAX_POWER_W), 50.0f},
       {"soc_protect_low", "ESS SOC Protect Low", "ess/soc_protect/low", "set/soc_protect_low", 1.0f, 100.0f, 1.0f},
       {"soc_protect_hyst", "ESS SOC Protect Hysteresis", "ess/soc_protect/hyst", "set/soc_protect_hyst", 0.0f, 30.0f, 1.0f},
       {"soc_protect_high", "ESS SOC Protect High", "ess/soc_protect/high", "set/soc_protect_high", 50.0f, 100.0f, 1.0f},
@@ -1676,11 +1708,14 @@ static void publishHaDiscovery() {
     const char* standbyCmd = setStandbyTopic.c_str();
     const char* autoCmd = setAutoTopic.c_str();
     const char* resetICmd = setResetITopic.c_str();
+    const String setChargeTopic = String(DEVICE_NAME) + "/set/charge";
+    const char* chargeCmd = setChargeTopic.c_str();
     struct {
       const char* objectId;
       const char* name;
       const char* commandTopic;
     } buttons[] = {
+        {"charge", "Charge", chargeCmd}, // starts a manual charge at the Max Charge Power
         {"standby", "Standby", standbyCmd},
         {"auto", "Auto", autoCmd},
         {"reset_i", "Reset Integral", resetICmd},
@@ -1941,6 +1976,36 @@ static void followTick() {
     return;
   }
 
+  // Manual charge session: the command is only a max power. A low actual power
+  // (BMS limit, taper) is not a fault, and the prohibit bit is sticky between
+  // passive replies, so only act on it after it persisted for FOLLOW_CONFIRM_MS.
+  const bool manualSession = manualChargeW != 0 && wantCharge;
+  if (manualSession) {
+    if (!sofarChargeProhibited()) {
+      followProhibitSinceMs = 0;
+    } else if (followProhibitSinceMs == 0) {
+      followProhibitSinceMs = now;
+    }
+    if (!sofarChargeProhibited() ||
+        (now - followProhibitSinceMs) < uint32_t(FOLLOW_CONFIRM_MS)) {
+      followOk = true;
+      followFailSinceMs = 0;
+      if (followHaveActual) {
+        followErrorW = int16_t(int(cmd) - int(actual)); // informational only
+#if DUAL_BATT_ENABLE
+        dualBattClearStickyOnFollow(cmd, actual < -int16_t(essHoldMinW));
+#endif
+        followPrevActualW = actual;
+      } else {
+        followErrorW = 0;
+      }
+      return;
+    }
+    // Prohibited for the full confirm window: fall through to the limit handling.
+  } else {
+    followProhibitSinceMs = 0;
+  }
+
   if (wantCharge && sofarChargeProhibited()) {
 #if DUAL_BATT_ENABLE
     if (!dualBattActiveStickyFull()) {
@@ -2025,6 +2090,53 @@ static void followTick() {
   }
 
   followStartStandbyRecover();
+}
+
+// Manual charge session: manualChargeW is a max charge power, so the pack taking
+// less is fine. Keep the command alive: re-send periodically (this also refreshes
+// the inverter passive status bits) and after any unplanned standby, for example
+// a bank-switch resume that failed once. ESS mode does this itself every cycle.
+static void manualChargeTick() {
+  if (manualChargeW == 0) {
+    return;
+  }
+  if (essEnabled) {
+    endManualCharge();
+    return;
+  }
+  if (followRecoverState != FollowRecoverState::Idle) {
+    return;
+  }
+#if DUAL_BATT_ENABLE
+  if (dualBattBusy()) {
+    return; // bank switch owns Sofar commands and resumes the charge itself
+  }
+#endif
+  const uint32_t now = millis();
+  const bool modeOk =
+      sofarLastMode() == SofarMode::Charge && sofarLastSetpointW() == manualChargeW;
+  const bool due =
+      manualChargeSentMs == 0 ||
+      (now - manualChargeSentMs) >= uint32_t(MANUAL_CHARGE_REFRESH_MS);
+  if (modeOk && !due) {
+    return;
+  }
+  if (manualChargeTryMs != 0 && (now - manualChargeTryMs) < 2000) {
+    return; // do not hammer RS485 when sends fail
+  }
+  manualChargeTryMs = now;
+  if (sofarCharge(manualChargeW)) {
+    manualChargeSentMs = now;
+    lastCmdW = -int16_t(manualChargeW);
+    lastCmdMs = now;
+    if (!modeOk) {
+      beginFollowGrace();
+      Log.printf("[charge] manual charge re-asserted at %uW max\n", manualChargeW);
+      mqttPublish("ess/mode", modeName(sofarLastMode()));
+    }
+  } else {
+    Log.println("[charge] manual charge re-send failed — will retry");
+  }
 }
 
 static void applyEss(float gridPowerW) {
@@ -2298,6 +2410,9 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     } else {
       essEnabled = true;
     }
+    if (essEnabled) {
+      endManualCharge(); // ESS owns the command again
+    }
     mqttPublish("ess/enabled", essEnabled ? "true" : "false", true);
     nvsPutBool("ess_en", essEnabled);
     if (msg == "charge_only" || msg == "excess" || msg == "battery_save") {
@@ -2476,6 +2591,23 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
+  if (cmd == "max_charge_w" || cmd == "max_charge_power") {
+    const int v = msg.toInt();
+    if (v >= 200 && v <= int(MAX_POWER_W)) {
+      maxChargeW = uint16_t(v);
+      nvsPutU16("chg_max_w", maxChargeW);
+      Log.printf("[charge] max_charge_w=%u\n", maxChargeW);
+      if (manualChargeW != 0) {
+        manualChargeW = maxChargeW; // running session follows the new maximum
+        manualChargeSentMs = 0;     // re-send on the next tick
+      }
+      publishManualCharge();
+    } else {
+      Log.println("[charge] max_charge_w out of range (200..MAX)");
+    }
+    return;
+  }
+
 #if DUAL_BATT_ENABLE
   if (cmd == "dual_batt" || cmd == "dual_batt_enabled") {
     dualBattEnabled = (msg != "false" && msg != "0" && msg != "off");
@@ -2562,7 +2694,10 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 
   // Manual Sofar2mqtt-compatible overrides disable ESS until re-enabled
-  const int value = msg.toInt();
+  // "charge true|start|on" (HA button) uses the stored max charge power.
+  const int value = (cmd == "charge" && (msg == "true" || msg == "start" || msg == "on"))
+                        ? int(maxChargeW)
+                        : msg.toInt();
   bool handled = false;
 
   if (cmd == "standby" && msg != "false") {
@@ -2570,6 +2705,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     resetEssIntegral();
     chargeTargetSoc = 0;
     publishChargeTargetSoc();
+    endManualCharge();
     handled = sofarStandby();
     if (handled) {
       beginFollowGrace();
@@ -2577,16 +2713,29 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   } else if (cmd == "auto") {
     essEnabled = false;
     resetEssIntegral();
+    endManualCharge();
     if (msg == "true") {
       handled = sofarAuto();
     }
   } else if (cmd == "charge" && value > 0 && value <= MAX_POWER_W) {
     essEnabled = false;
     resetEssIntegral();
+    // Start a manual charge session; value is the max charge power. The session
+    // re-sends it, so a failed first send is retried by manualChargeTick().
+    manualChargeW = uint16_t(value);
+    manualChargeSentMs = 0;
+    manualChargeTryMs = 0;
+    followProhibitSinceMs = 0;
     handled = sofarCharge(uint16_t(value));
+    if (handled) {
+      manualChargeSentMs = millis();
+      beginFollowGrace();
+    }
+    publishManualCharge();
   } else if (cmd == "discharge" && value > 0 && value <= MAX_POWER_W) {
     essEnabled = false;
     resetEssIntegral();
+    endManualCharge();
     handled = sofarDischarge(uint16_t(value));
   }
 
@@ -2625,6 +2774,7 @@ static void ensureMqtt() {
   epsPublishState();
   publishEssParams();
   publishChargeTargetSoc();
+  publishManualCharge();
 #if DUAL_BATT_ENABLE
   publishDualBatt();
 #endif
@@ -2769,6 +2919,10 @@ static void publishState() {
   json += modeName(sofarLastMode());
   json += "\",\"charge_target_soc\":";
   json += String(chargeTargetSoc);
+  json += ",\"max_charge_w\":";
+  json += String(maxChargeW);
+  json += ",\"manual_charge_w\":";
+  json += String(manualChargeW);
 #if DUAL_BATT_ENABLE
   json += ",\"battery_active\":\"";
   json += dualBattLabel(dualBattActive);
@@ -3118,6 +3272,7 @@ void loop() {
 #if DUAL_BATT_ENABLE
     dualBattTick();
 #endif
+    manualChargeTick();
 
     // One Sofar register per ESS cycle (run → grid → batt → soc → …). Keeps
     // MQTT state fresh without a 4-read stall every 10 s.

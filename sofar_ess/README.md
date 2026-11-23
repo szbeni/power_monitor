@@ -187,7 +187,10 @@ Sign convention for power values: **+ = discharge / import**, **− = charge / e
 | `…/set/reset_i` | sub | any — clear PI integrator |
 | `…/set/standby` | sub | `true` — force standby (battery idle). **Disables ESS** |
 | `…/set/auto` | sub | `true` — Sofar auto (inverter self-control). **Disables ESS** |
-| `…/set/charge` | sub | watts (1…MAX) — force charge. **Disables ESS** |
+| `…/set/charge` | sub | watts (1…MAX), or `true` / `start` / `on` for the stored max — start a manual charge session. The value is a **max charge power ceiling**: the pack may take less (BMS limit, taper) without the firmware stopping, marking the bank full or swapping. **Disables ESS** |
+| `…/set/max_charge_w` | sub | int 200…MAX — stored max charge power used by `set/charge true` / the Charge button (persistent; updates a running session) |
+| `…/charge/max_w` | pub | Stored max charge power W (retained) |
+| `…/charge/manual_w` | pub | Active manual charge session power W (retained; `0` = no session) |
 | `…/set/charge_target_soc` | sub | int 0…100 — pack-wide (combined) target. When the active bank reaches it while combined is short, hand over to the other bank and keep charging; go standby once combined reaches it (0 = no limit) |
 | `…/charge/target_soc` | pub | Current charge target SOC % (retained; 0 = no limit) |
 | `…/set/discharge` | sub | watts (1…MAX) — force discharge. **Disables ESS** |
@@ -223,6 +226,7 @@ mosquitto_pub -t sofaress/set/battery -m Auto
 | `ess_integral` | Integrator state |
 | `sofar_mode` | `standby` / `charge` / `discharge` / `auto` / `unknown` |
 | `charge_target_soc` | Manual charge stop target % (0 = no limit) |
+| `max_charge_w` / `manual_charge_w` | Stored max charge power (W) / active manual charge session power (W, 0 = none) |
 | `battery_active` / `battery_force` / `battery_dual_state` | Dual-battery active bank, force, state machine |
 | `battery_dual_enabled` / `battery_empty_soc` / `battery_full_soc` | Dual-battery policy config |
 | `battery_a_soc` / `battery_b_soc` | Per-bank last-known SOC (`null` if never seen) |
@@ -251,6 +255,21 @@ mosquitto_pub -t sofaress/set/battery -m Auto
 
 Manual `/set/charge|discharge|standby|auto` turns ESS off so you can take over; publish `…/set/ess` `true` to resume the loop (or `charge_only` to resume soak-only).
 
+#### Manual charge session (max charge power)
+
+`set/charge <W>` (or the **Charge** button, which uses **Max Charge Power**) starts a manual charge session. `<W>` is a ceiling ("commanded max charging current"), not a target:
+
+- Actual power below it (BMS limit on bank B, taper on a nearly full bank A) is normal. It never stops the charge, marks a bank full, or triggers a swap. A BMS charge-prohibit is only acted on if it persists for `FOLLOW_CONFIRM_MS`.
+- The firmware re-sends the command every `MANUAL_CHARGE_REFRESH_MS` (15 s) and after any unplanned standby, for example a bank-switch resume that failed once.
+- The session ends on `set/standby`, `set/auto`, `set/discharge`, enabling ESS, or when `charge_target_soc` is reached (combined SOC, with handover to the other bank first). It is not stored across reboots.
+- Bank swaps in a session still happen for a real bank limit (charge-prohibited for the full confirm window) or when the target handover applies.
+
+```bash
+mosquitto_pub -t sofaress/set/max_charge_w -m 2000
+mosquitto_pub -t sofaress/set/charge -m true      # charge at up to 2000 W
+mosquitto_pub -t sofaress/set/charge -m 1500      # one-off 1500 W max
+```
+
 Example charge-only:
 ```bash
 mosquitto_pub -t sofaress/set/ess -m charge_only
@@ -266,8 +285,8 @@ With MQTT discovery enabled (`HA_MQTT_DISCOVERY=1`, default), device **Sofar ESS
 - Binary sensors: Sofar OK (RS485), Sofar fault active, ESS SOC protect active  
 - Switch: ESS enabled, ESS charge only, ESS SOC protect, Dual Battery Auto  
 - Select: Battery Bank (`Auto` / `Battery A` / `Battery B`)  
-- Numbers: ESS Kp, ESS Ki, Deadband, Min Delta, Hold Min, SOC protect low/hyst, Battery empty/full SOC  
-- Buttons: Standby, Auto, Reset Integral  
+- Numbers: ESS Kp, ESS Ki, Deadband, Min Delta, Hold Min, Max Charge Power, SOC protect low/hyst, Battery empty/full SOC  
+- Buttons: Charge (starts a manual charge at Max Charge Power), Standby, Auto, Reset Integral  
 
 HA package templates (in `smart_energy.yaml`): `sensor.site_solar_total_power` (Hoymiles 1600 + 800 + Sofar PV), `sensor.site_solar_today_kwh`, `sensor.house_load_power` (`grid + site_solar + battery_dc_power`, fallback to ESS command), and daily `sensor.house_load_energy_daily`.
 
