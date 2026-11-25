@@ -133,6 +133,10 @@ static bool dualBattStickyEmptyA = false;
 static bool dualBattStickyEmptyB = false;
 static bool dualBattStickyFullA = false;
 static bool dualBattStickyFullB = false;
+// SOC of each bank when its sticky full flag was set. The flag clears once the
+// bank's SOC falls DUAL_BATT_FULL_CLEAR_DROP below this (see dualBattExpireStickyFull).
+static uint8_t dualBattFullMarkSocA = 0;
+static uint8_t dualBattFullMarkSocB = 0;
 #endif
 
 #if HA_MQTT_DISCOVERY
@@ -837,7 +841,9 @@ static void dualBattBeginSwitch(uint8_t bank) {
 // urgent = protection or safety handover (BMS refuse, active bank empty,
 // overnight target). Auto-only dwell does not apply to urgent requests.
 static bool dualBattRequestBank(uint8_t bank, bool urgent = false) {
-  if (!dualBattEnabled && dualBattForce == 0) {
+  // dualBattEnabled ("Automatic A-first policy") only gates preference switching.
+  // Urgent handovers (overnight target, BMS refuse, bank empty/full) still run.
+  if (!urgent && !dualBattEnabled && dualBattForce == 0) {
     return false;
   }
   if (bank == dualBattActive || bank == 0) {
@@ -910,14 +916,48 @@ static void dualBattMarkActiveEmpty() {
 }
 
 static void dualBattMarkActiveFull() {
+  // Record the SOC at the moment of marking. Re-marking an already-full bank
+  // keeps the original reference so the drop check stays meaningful.
+  uint8_t soc = dualBattFullSoc;
+  if (lastSofar.socValid) {
+    soc = uint8_t(lastSofar.batterySoc);
+  } else if (dualBattActive == 2 ? dualBattSocBValid : dualBattSocAValid) {
+    soc = dualBattActive == 2 ? dualBattSocB : dualBattSocA;
+  }
   if (dualBattActive == 2) {
+    if (!dualBattStickyFullB) {
+      dualBattFullMarkSocB = soc;
+    }
     dualBattStickyFullB = true;
     dualBattStickyEmptyB = false;
   } else {
+    if (!dualBattStickyFullA) {
+      dualBattFullMarkSocA = soc;
+    }
     dualBattStickyFullA = true;
     dualBattStickyEmptyA = false;
   }
-  Log.printf("[dual] mark %s full (sticky)\n", dualBattLabel(dualBattActive));
+  Log.printf("[dual] mark %s full (sticky) at SOC %u\n", dualBattLabel(dualBattActive), unsigned(soc));
+}
+
+// The full flag is only valid while the pack still holds charge. Clear it once a
+// bank's known SOC has dropped DUAL_BATT_FULL_CLEAR_DROP below the marked level,
+// so a pack that was full and then discharged is not locked out of charging.
+static void dualBattExpireStickyFull() {
+  if (dualBattStickyFullA && dualBattSocAValid &&
+      int(dualBattSocA) <= int(dualBattFullMarkSocA) - int(DUAL_BATT_FULL_CLEAR_DROP)) {
+    dualBattStickyFullA = false;
+    Log.printf("[dual] A no longer full (SOC %u, marked at %u)\n",
+               unsigned(dualBattSocA),
+               unsigned(dualBattFullMarkSocA));
+  }
+  if (dualBattStickyFullB && dualBattSocBValid &&
+      int(dualBattSocB) <= int(dualBattFullMarkSocB) - int(DUAL_BATT_FULL_CLEAR_DROP)) {
+    dualBattStickyFullB = false;
+    Log.printf("[dual] B no longer full (SOC %u, marked at %u)\n",
+               unsigned(dualBattSocB),
+               unsigned(dualBattFullMarkSocB));
+  }
 }
 
 static void dualBattClearStickyOnFollow(int16_t cmdW, bool following) {
@@ -948,7 +988,11 @@ static bool dualBattActiveStickyFull() {
 }
 
 static bool dualBattTrySwapOther(bool forEmpty, bool urgent = false) {
-  if (!dualBattEnabled || dualBattForce != 0 || dualBattBusy()) {
+  // Forced bank: no handover. Auto with A-first off: urgent handovers still run.
+  if (dualBattForce != 0 || dualBattBusy()) {
+    return false;
+  }
+  if (!urgent && !dualBattEnabled) {
     return false;
   }
   const uint8_t other = (dualBattActive == 2) ? 1 : 2;
@@ -1027,6 +1071,7 @@ static void dualBattEvaluatePolicy() {
 
 static void dualBattTick() {
   const uint32_t now = millis();
+  dualBattExpireStickyFull();
 
   switch (dualBattState) {
     case DualBattState::Idle:
@@ -1166,7 +1211,10 @@ static void checkChargeTargetSoc() {
   // Unknown combined (other bank not seen yet) counts as short: the other bank
   // may still take charge.
   const bool combinedShort = isnan(combinedSoc) || combinedSoc < target;
-  if (dualBattEnabled && combinedShort) {
+  // Runs regardless of the A-first switch: with it off, the pack would otherwise
+  // never reach the target (combined can't get there) and keep charging the
+  // active bank into BMS refusal.
+  if (combinedShort) {
     // Active bank reached the target (or is physically full) but the pack is
     // still short: hand over to the other bank and keep charging.
     const bool activeAtLimit =

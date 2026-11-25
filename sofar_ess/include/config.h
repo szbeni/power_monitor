@@ -196,6 +196,11 @@
 #endif
 // Minimum minutes between Auto-initiated bank switches (sun in/out bounce guard).
 // Forced, BMS-refused, active-empty and overnight-target handovers bypass it. 0 = off.
+// A bank marked full stops counting as full once its SOC is this many % below
+// the level it was marked at (it has been discharged since).
+#ifndef DUAL_BATT_FULL_CLEAR_DROP
+#define DUAL_BATT_FULL_CLEAR_DROP 3
+#endif
 #ifndef DUAL_BATT_AUTO_DWELL_MIN
 #define DUAL_BATT_AUTO_DWELL_MIN 15
 #endif
