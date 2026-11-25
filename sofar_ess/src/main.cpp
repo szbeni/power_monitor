@@ -1007,17 +1007,22 @@ static bool dualBattTrySwapOther(bool forEmpty, bool urgent = false) {
 }
 
 static void dualBattEvaluatePolicy() {
-  if (!dualBattEnabled || dualBattBusy()) {
+  if (dualBattBusy()) {
     return;
   }
 
   // Force override: keep requested bank connected.
   if (dualBattForce == 1 || dualBattForce == 2) {
-    if (dualBattForce != dualBattActive) {
+    if (dualBattEnabled && dualBattForce != dualBattActive) {
       dualBattRequestBank(dualBattForce, true); // forced: no Auto dwell
     }
     return;
   }
+
+  // In Auto, leaving a bank that can no longer deliver (empty on discharge,
+  // full/at target on charge) always runs. The A-first switch (dualBattEnabled)
+  // only gates the preference moves back toward A below.
+  const bool preferA = dualBattEnabled;
 
   // Intent from last ESS/manual command. Near-zero hold does not switch banks.
   // Full protect replaces the charge command with a discharge hold, so a charge
@@ -1051,20 +1056,20 @@ static void dualBattEvaluatePolicy() {
       if (aEmpty && !bEmpty) {
         dualBattRequestBank(2, true);
       }
-    } else {
-      if (!aEmpty) {
-        dualBattRequestBank(1, bEmpty);
-      }
+    } else if (bEmpty && !aEmpty) {
+      dualBattRequestBank(1, true); // required: connected bank is empty
+    } else if (preferA && !aEmpty) {
+      dualBattRequestBank(1); // preference: back to A (Auto dwell applies)
     }
   } else if (wantCharge) {
     if (dualBattActive == 1) {
       if (aFull && !bFull) {
-        dualBattRequestBank(2);
+        dualBattRequestBank(2, true); // required: connected bank can't take more
       }
-    } else {
-      if (!aFull) {
-        dualBattRequestBank(1);
-      }
+    } else if (bFull && !aFull) {
+      dualBattRequestBank(1, true); // required: connected bank can't take more
+    } else if (preferA && !aFull) {
+      dualBattRequestBank(1); // preference: back to A (Auto dwell applies)
     }
   }
 }
